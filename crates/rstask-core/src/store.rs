@@ -6,6 +6,7 @@
 //! - Status moves only along the workflow gate: queue → work → review → done.
 //! - Every mutation appends to the immutable event log in the same transaction.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
@@ -19,7 +20,7 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::event::{EventId, Signable, StoredEvent};
-use crate::models::{Actor, ActorKind, Claim, Event, ReleaseReason, Task, TaskStatus};
+use crate::models::{Actor, ActorKind, Claim, Event, ReleaseReason, Submission, Task, TaskStatus};
 use crate::sync::{ActorRow, Bucket, Merge, SyncBundle, BUCKET};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
@@ -204,7 +205,17 @@ impl Store {
         self.get_task(&id).await
     }
 
+    /// Return stale claims' tasks to the pool, so reads never show dead
+    /// `work` (PRD-v3 M1).
+    async fn sweep_expired(&self) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sweep_expired_tx(&mut tx, Utc::now()).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn get_task(&self, id: &str) -> Result<Task> {
+        self.sweep_expired().await?;
         sqlx::query_as::<_, Task>("SELECT * FROM tasks WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
@@ -213,6 +224,7 @@ impl Store {
     }
 
     pub async fn list_tasks(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
+        self.sweep_expired().await?;
         match status {
             Some(s) => {
                 sqlx::query_as::<_, Task>(
@@ -295,24 +307,18 @@ impl Store {
     /// `Error::InvalidTransition` if the task is not in `queue`.
     pub async fn claim_task(&self, task_id: &str, actor_id: &str, ttl: Duration) -> Result<Claim> {
         let signing_key = self.signing_key(actor_id).await?;
+        let now = Utc::now();
         let mut tx = self.pool.begin().await?;
 
-        // Lazy sweep of expired claims (no heartbeat past TTL → back to pool).
+        // Sweep expired claims (not renewed past TTL → back to pool).
         // Any `work` task left without an active claim returns to `queue`.
-        sqlx::query(
-            "UPDATE claims SET released_at = ?, release_reason = 'expired'
-             WHERE released_at IS NULL AND expires_at <= ?",
-        )
-        .bind(Utc::now())
-        .bind(Utc::now())
-        .execute(&mut *tx)
-        .await?;
+        sweep_expired_tx(&mut tx, now).await?;
         sqlx::query(
             "UPDATE tasks SET status = 'queue', updated_at = ?
              WHERE status = 'work'
                AND id NOT IN (SELECT task_id FROM claims WHERE released_at IS NULL)",
         )
-        .bind(Utc::now())
+        .bind(now)
         .execute(&mut *tx)
         .await?;
 
@@ -351,7 +357,6 @@ impl Store {
 
         self.require_actor_tx(&mut tx, actor_id).await?;
 
-        let now = Utc::now();
         let claim = Claim {
             id: Uuid::new_v4().to_string(),
             task_id: task_id.to_string(),
@@ -406,7 +411,9 @@ impl Store {
             });
         }
         let signing_key = self.signing_key(actor_id).await?;
+        let at = Utc::now();
         let mut tx = self.pool.begin().await?;
+        sweep_expired_tx(&mut tx, at).await?;
 
         let claim_id: Option<String> = sqlx::query_scalar(
             "SELECT id FROM claims
@@ -427,7 +434,7 @@ impl Store {
             "UPDATE claims SET released_at = ?, release_reason = ?
              WHERE id = ? AND released_at IS NULL",
         )
-        .bind(Utc::now())
+        .bind(at)
         .bind(reason)
         .bind(claim_id.as_deref().unwrap_or(""))
         .execute(&mut *tx)
@@ -446,7 +453,7 @@ impl Store {
             "UPDATE tasks SET status = 'queue', updated_at = ?
              WHERE id = ? AND status = 'work'",
         )
-        .bind(Utc::now())
+        .bind(at)
         .bind(task_id)
         .execute(&mut *tx)
         .await?;
@@ -462,7 +469,7 @@ impl Store {
                 "claim.released"
             },
             json!({ "claim_id": claim_id }),
-            Utc::now(),
+            at,
         )
         .await?;
 
@@ -470,39 +477,61 @@ impl Store {
         Ok(())
     }
 
-    /// Renew a claim's TTL (heartbeat from the claim holder).
-    pub async fn renew_claim(&self, task_id: &str, actor_id: &str, ttl: Duration) -> Result<()> {
-        let expires_at =
-            Utc::now() + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::MAX);
-        let res = sqlx::query(
-            "UPDATE claims SET expires_at = ?
-             WHERE task_id = ? AND actor_id = ? AND released_at IS NULL",
+    /// Renew the holder's claim: a signed `task.renewed` event moves the
+    /// expiry on every replica (PRD-v3 M1). An expired claim cannot be renewed.
+    pub async fn renew_claim(&self, task_id: &str, actor_id: &str, ttl: Duration) -> Result<Claim> {
+        let signing_key = self.signing_key(actor_id).await?;
+        let at = Utc::now();
+        let expires_at = at + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::MAX);
+        let mut tx = self.pool.begin().await?;
+        sweep_expired_tx(&mut tx, at).await?;
+        let claim_id =
+            require_claim_tx(&mut tx, task_id, actor_id, "task.renewed", TaskStatus::Work).await?;
+        sqlx::query("UPDATE claims SET expires_at = ? WHERE id = ?")
+            .bind(expires_at)
+            .bind(&claim_id)
+            .execute(&mut *tx)
+            .await?;
+        self.append_event_tx(
+            &mut tx,
+            &signing_key,
+            actor_id,
+            task_id,
+            "task.renewed",
+            json!({ "claim_id": claim_id, "expires_at": expires_at }),
+            at,
         )
-        .bind(expires_at)
-        .bind(task_id)
-        .bind(actor_id)
-        .execute(&self.pool)
         .await?;
-        if res.rows_affected() == 0 {
-            return Err(Error::ClaimExpired(task_id.to_string()));
-        }
-        Ok(())
+        let claim = sqlx::query_as::<_, Claim>("SELECT * FROM claims WHERE id = ?")
+            .bind(&claim_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(claim)
     }
 
     // -------------------------------------------------------------- workflow
 
-    /// Submit for review: work → review. Releases the claim and requires
-    /// that the submitter actually holds it (agents can't move others' work).
-    pub async fn submit_for_review(&self, task_id: &str, actor_id: &str) -> Result<Task> {
+    /// Submit for review: work → review. Only the holder of a live claim
+    /// submits; the claim is released and the submission (PRD-v3 M2) rides on
+    /// the event for the reviewer.
+    pub async fn submit_for_review(
+        &self,
+        task_id: &str,
+        actor_id: &str,
+        submission: &Submission,
+    ) -> Result<Task> {
         let signing_key = self.signing_key(actor_id).await?;
         let at = Utc::now();
         let mut tx = self.pool.begin().await?;
-        let claim_id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM claims WHERE task_id = ? AND actor_id = ? AND released_at IS NULL",
+        sweep_expired_tx(&mut tx, at).await?;
+        let claim_id = require_claim_tx(
+            &mut tx,
+            task_id,
+            actor_id,
+            "task.submitted",
+            TaskStatus::Review,
         )
-        .bind(task_id)
-        .bind(actor_id)
-        .fetch_optional(&mut *tx)
         .await?;
         self.transition_tx(
             &mut tx,
@@ -512,20 +541,21 @@ impl Store {
             TaskStatus::Work,
             TaskStatus::Review,
             "task.submitted",
-            json!({ "claim_id": claim_id }),
+            json!({
+                "claim_id": claim_id,
+                "summary": submission.summary,
+                "refs": submission.refs,
+                "evidence": submission.evidence,
+            }),
             at,
         )
         .await?;
         // Release the submitter's claim: work on this task is done.
-        sqlx::query(
-            "UPDATE claims SET released_at = ?, release_reason = 'done'
-             WHERE task_id = ? AND actor_id = ? AND released_at IS NULL",
-        )
-        .bind(at)
-        .bind(task_id)
-        .bind(actor_id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE claims SET released_at = ?, release_reason = 'done' WHERE id = ?")
+            .bind(at)
+            .bind(&claim_id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         self.get_task(task_id).await
     }
@@ -568,8 +598,14 @@ impl Store {
         self.get_task(task_id).await
     }
 
-    /// Send back for rework: review → queue.
-    pub async fn request_changes(&self, task_id: &str, actor_id: &str) -> Result<Task> {
+    /// Send back for rework: review → queue. The reason rides on the event
+    /// for whoever picks the task up next (PRD-v3 M2).
+    pub async fn request_changes(
+        &self,
+        task_id: &str,
+        actor_id: &str,
+        reason: &str,
+    ) -> Result<Task> {
         let signing_key = self.signing_key(actor_id).await?;
         let mut tx = self.pool.begin().await?;
         self.transition_tx(
@@ -580,7 +616,7 @@ impl Store {
             TaskStatus::Review,
             TaskStatus::Queue,
             "task.changes_requested",
-            json!({}),
+            json!({ "reason": reason }),
             Utc::now(),
         )
         .await?;
@@ -918,6 +954,84 @@ impl Store {
 // DAG helpers (tx-level, free functions)
 // ---------------------------------------------------------------------------------------
 
+/// Return every stale claim's task to the pool as of `at` (PRD-v3 M1): a
+/// claim is live in `[claimed_at, expires_at)`. The expiry instant stamps the
+/// rows — the same values the fold derives on other replicas.
+async fn sweep_expired_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    at: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE tasks SET status = 'queue',
+             updated_at = max(updated_at, (SELECT c.expires_at FROM claims c
+                 WHERE c.task_id = tasks.id AND c.released_at IS NULL))
+         WHERE status = 'work'
+           AND id IN (SELECT task_id FROM claims
+                      WHERE released_at IS NULL AND expires_at <= ?)",
+    )
+    .bind(at)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE claims SET released_at = expires_at, release_reason = 'expired'
+         WHERE released_at IS NULL AND expires_at <= ?",
+    )
+    .bind(at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// The actor's live claim on the task, or why it has none. Call after
+/// `sweep_expired_tx`. `via`/`to` describe the attempted move for the error.
+async fn require_claim_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task_id: &str,
+    actor_id: &str,
+    via: &str,
+    to: TaskStatus,
+) -> Result<String> {
+    let own: Option<(String, Option<ReleaseReason>)> = sqlx::query_as(
+        "SELECT id, release_reason FROM claims
+         WHERE task_id = ? AND actor_id = ? ORDER BY claimed_at DESC LIMIT 1",
+    )
+    .bind(task_id)
+    .bind(actor_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    match own {
+        Some((id, None)) => return Ok(id),
+        Some((_, Some(ReleaseReason::Expired))) => {
+            return Err(Error::ClaimExpired(task_id.to_string()));
+        }
+        _ => {}
+    }
+    let holder: Option<String> =
+        sqlx::query_scalar("SELECT actor_id FROM claims WHERE task_id = ? AND released_at IS NULL")
+            .bind(task_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    if let Some(holder) = holder {
+        return Err(Error::ClaimConflict {
+            task: task_id.to_string(),
+            actor: holder,
+        });
+    }
+    let status: Option<TaskStatus> = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
+        .bind(task_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    match status {
+        None => Err(Error::TaskNotFound(task_id.to_string())),
+        Some(from) => Err(Error::InvalidTransition {
+            task: task_id.to_string(),
+            from: from.to_string(),
+            via: via.to_string(),
+            to: to.to_string(),
+        }),
+    }
+}
+
 enum Insert {
     Added,
     Parked,
@@ -1150,6 +1264,7 @@ async fn apply_effect_tx(
         }
         // Claims and status fold per task below (D8, PRD-v3 G1).
         "task.claimed"
+        | "task.renewed"
         | "claim.released"
         | "claim.force_released"
         | "task.submitted"
@@ -1162,127 +1277,186 @@ async fn apply_effect_tx(
     Ok(())
 }
 
+/// A claim the fold currently considers the lock holder.
+struct Held {
+    id: String,
+    actor_id: String,
+    claimed_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+/// Fold state for one task.
+struct Fold {
+    held: Option<Held>,
+    /// Claims that stopped holding the lock: (claim id, why, when).
+    ended: Vec<(String, ReleaseReason, DateTime<Utc>)>,
+    status: TaskStatus,
+    status_at: Option<DateTime<Utc>>,
+}
+
+impl Fold {
+    fn set(&mut self, status: TaskStatus, at: DateTime<Utc>) {
+        self.status = status;
+        self.status_at = Some(at);
+    }
+
+    /// A claim is live in `[claimed_at, expires_at)`: by `at`, has it lapsed?
+    fn expire(&mut self, at: DateTime<Utc>) {
+        if let Some(h) = self.held.take_if(|h| h.expires_at <= at) {
+            self.set(TaskStatus::Queue, h.expires_at);
+            self.ended
+                .push((h.id, ReleaseReason::Expired, h.expires_at));
+        }
+    }
+}
+
 /// Re-fold a task's workflow events in `(lamport, event_id)` order: the first
 /// claim wins the lock, later concurrent claims stay in the log but are
 /// ineffective (PRD-v2 D8); the status walks the gate, and an event that does
-/// not fit the status reached so far is ineffective too (PRD-v3 G1).
-/// Recomputed wholesale on every workflow merge so the result never depends
-/// on arrival order.
+/// not fit the status reached so far is ineffective too (PRD-v3 G1). Expiry is
+/// judged against each event's own `at` — the local clock only decides whether
+/// the last holder has lapsed by now — and a renewal the holder made before
+/// its claim lapsed always counts, wherever it sorts in the log (PRD-v3 M1).
+/// Recomputed wholesale on
+/// every workflow merge so the result never depends on arrival order.
 async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &str) -> Result<()> {
     let rows: Vec<(String, String, DateTime<Utc>, String)> = sqlx::query_as(
         "SELECT kind, actor_id, at, payload FROM events
          WHERE task_id = ?1 AND event_id IS NOT NULL
-           AND kind IN ('task.claimed','claim.released','claim.force_released',
-                        'task.submitted','task.approved','task.changes_requested')
+           AND kind IN ('task.created','task.updated','task.claimed','task.renewed',
+                        'claim.released','claim.force_released','task.submitted',
+                        'task.approved','task.changes_requested')
          ORDER BY lamport, event_id",
     )
     .bind(task_id)
     .fetch_all(&mut **tx)
     .await?;
 
-    let now = Utc::now();
-    // (claim_id, actor_id, claimed_at, expires_at)
-    let mut active: Option<(String, String, DateTime<Utc>, DateTime<Utc>)> = None;
-    let mut folded_out: Vec<(String, ReleaseReason)> = Vec::new();
-    let mut status = TaskStatus::Queue;
-    let mut status_at: Option<DateTime<Utc>> = None;
-
-    for (kind, actor_id, at, payload) in rows {
-        let payload: serde_json::Value =
-            serde_json::from_str(&payload).unwrap_or(serde_json::json!({}));
-        let claim_id = payload["claim_id"].as_str().unwrap_or("").to_string();
-        match kind.as_str() {
-            "task.claimed" => {
-                if active.is_none() && status == TaskStatus::Queue {
-                    let exp: Option<DateTime<Utc>> =
-                        serde_json::from_value(payload["expires_at"].clone()).ok();
-                    if let Some(exp) = exp.filter(|e| *e > now) {
-                        active = Some((claim_id, actor_id, at, exp));
-                        (status, status_at) = (TaskStatus::Work, Some(at));
-                    }
-                    // An already-expired claim never activates (lazy-sweep parity).
-                }
-                // Task already claimed or past `queue`: ineffective (D8).
+    let json = |payload: &str| -> serde_json::Value {
+        serde_json::from_str(payload).unwrap_or(serde_json::json!({}))
+    };
+    let claim_id_of = |p: &serde_json::Value| p["claim_id"].as_str().unwrap_or("").to_string();
+    let expiry_of = |p: &serde_json::Value| {
+        serde_json::from_value::<DateTime<Utc>>(p["expires_at"].clone()).ok()
+    };
+    // Each claim's final expiry: its own TTL, moved by its holder's renewals
+    // in time order, each counting only if made before the claim lapsed.
+    let mut expiry: HashMap<String, (&str, DateTime<Utc>)> = HashMap::new();
+    let mut renewals = Vec::new();
+    for (kind, actor_id, at, payload) in &rows {
+        let p = json(payload);
+        match (kind.as_str(), expiry_of(&p)) {
+            ("task.claimed", Some(exp)) => {
+                expiry.insert(claim_id_of(&p), (actor_id.as_str(), exp));
             }
-            "claim.released" | "claim.force_released" | "task.submitted" => {
-                if let Some((cid, _, _, _)) = &active {
-                    if *cid == claim_id {
-                        let reason = match kind.as_str() {
-                            "claim.force_released" => ReleaseReason::Forced,
-                            "task.submitted" => ReleaseReason::Done,
-                            _ => ReleaseReason::Released,
-                        };
-                        folded_out.push((cid.clone(), reason));
-                        status = if kind == "task.submitted" {
-                            TaskStatus::Review
-                        } else {
-                            TaskStatus::Queue
-                        };
-                        status_at = Some(at);
-                        active = None;
-                    }
-                }
-            }
-            "task.approved" if status == TaskStatus::Review => {
-                (status, status_at) = (TaskStatus::Done, Some(at));
-            }
-            "task.changes_requested" if status == TaskStatus::Review => {
-                (status, status_at) = (TaskStatus::Queue, Some(at));
+            ("task.renewed", Some(exp)) => {
+                renewals.push((*at, claim_id_of(&p), actor_id.as_str(), exp));
             }
             _ => {}
         }
     }
+    renewals.sort();
+    for (at, claim_id, actor_id, exp) in renewals {
+        if let Some((holder, current)) = expiry.get_mut(&claim_id) {
+            if *holder == actor_id && at < *current {
+                *current = exp;
+            }
+        }
+    }
+    let expiry: HashMap<String, DateTime<Utc>> =
+        expiry.into_iter().map(|(id, (_, exp))| (id, exp)).collect();
 
-    // Natural expiry, then fold every non-winning claim out of the active set.
-    sqlx::query(
-        "UPDATE claims SET released_at = ?, release_reason = 'expired'
-         WHERE task_id = ? AND released_at IS NULL AND expires_at <= ?",
-    )
-    .bind(now)
-    .bind(task_id)
-    .bind(now)
-    .execute(&mut **tx)
-    .await?;
-    for (cid, reason) in folded_out {
+    let now = Utc::now();
+    let mut f = Fold {
+        held: None,
+        ended: Vec::new(),
+        status: TaskStatus::Queue,
+        status_at: None,
+    };
+    // Latest content change; with `status_at` it derives `updated_at`.
+    let mut content_at: Option<DateTime<Utc>> = None;
+
+    for (kind, actor_id, at, payload) in rows {
+        let claim_id = claim_id_of(&json(&payload));
+        f.expire(at);
+        match kind.as_str() {
+            "task.created" | "task.updated" => content_at = content_at.max(Some(at)),
+            "task.claimed" if f.held.is_none() && f.status == TaskStatus::Queue => {
+                if let Some(&expires_at) = expiry.get(&claim_id) {
+                    f.held = Some(Held {
+                        id: claim_id,
+                        actor_id,
+                        claimed_at: at,
+                        expires_at,
+                    });
+                    f.set(TaskStatus::Work, at);
+                }
+            }
+            // Any other claim: the task is held or past `queue` — ineffective (D8).
+            "claim.released" | "claim.force_released" | "task.submitted" => {
+                if let Some(h) = f.held.take_if(|h| h.id == claim_id) {
+                    let (reason, status) = match kind.as_str() {
+                        "claim.force_released" => (ReleaseReason::Forced, TaskStatus::Queue),
+                        "task.submitted" => (ReleaseReason::Done, TaskStatus::Review),
+                        _ => (ReleaseReason::Released, TaskStatus::Queue),
+                    };
+                    f.ended.push((h.id, reason, at));
+                    f.set(status, at);
+                }
+            }
+            "task.approved" if f.status == TaskStatus::Review => f.set(TaskStatus::Done, at),
+            "task.changes_requested" if f.status == TaskStatus::Review => {
+                f.set(TaskStatus::Queue, at);
+            }
+            _ => {}
+        }
+    }
+    f.expire(now);
+
+    // Materialize the claims table from the fold.
+    for (cid, reason, at) in f.ended {
         sqlx::query(
             "UPDATE claims SET released_at = ?, release_reason = ? WHERE id = ? AND released_at IS NULL",
         )
-        .bind(now)
+        .bind(at)
         .bind(reason)
         .bind(cid)
         .execute(&mut **tx)
         .await?;
     }
-    if let Some((cid, actor_id, claimed_at, expires_at)) = active {
-        // The fold winner owns the lock: materialize its claim row on this
-        // replica (it may have been decided by an event received here).
+    let holder_id = f.held.as_ref().map_or(String::new(), |h| h.id.clone());
+    if let Some(h) = f.held {
+        // The winner's row may be missing here (claimed elsewhere) or stale
+        // (swept before its renewal arrived).
         sqlx::query(
-            "INSERT OR IGNORE INTO claims (id, task_id, actor_id, claimed_at, expires_at)
-                 VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO claims (id, task_id, actor_id, claimed_at, expires_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET
+                 expires_at = excluded.expires_at, released_at = NULL, release_reason = NULL",
         )
-        .bind(&cid)
+        .bind(&h.id)
         .bind(task_id)
-        .bind(actor_id)
-        .bind(claimed_at)
-        .bind(expires_at)
-        .execute(&mut **tx)
-        .await?;
-        // Any other still-active claim is a fold loser (D8).
-        sqlx::query(
-            "UPDATE claims SET released_at = ?, release_reason = 'released'
-                 WHERE task_id = ? AND released_at IS NULL AND id != ?",
-        )
-        .bind(now)
-        .bind(task_id)
-        .bind(cid)
+        .bind(h.actor_id)
+        .bind(h.claimed_at)
+        .bind(h.expires_at)
         .execute(&mut **tx)
         .await?;
     }
-    // The event that decided the status stamps it, so replicas agree on
-    // `updated_at` as well.
-    sqlx::query("UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3 AND status != ?1")
-        .bind(status)
-        .bind(status_at.unwrap_or(now))
+    // Any other still-active claim is a fold loser (D8).
+    sqlx::query(
+        "UPDATE claims SET released_at = ?, release_reason = 'released'
+         WHERE task_id = ? AND released_at IS NULL AND id != ?",
+    )
+    .bind(now)
+    .bind(task_id)
+    .bind(holder_id)
+    .execute(&mut **tx)
+    .await?;
+    // The events that decided status and content stamp `updated_at`, so
+    // replicas agree on it as well.
+    sqlx::query("UPDATE tasks SET status = ?, updated_at = COALESCE(?, updated_at) WHERE id = ?")
+        .bind(f.status)
+        .bind(f.status_at.max(content_at))
         .bind(task_id)
         .execute(&mut **tx)
         .await?;

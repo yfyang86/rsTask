@@ -29,9 +29,12 @@ cargo run -p rstask-cli -- board
 
 ## Invariants (enforced in rstask-core, regardless of interface)
 
-- **Claim = atomic lock with TTL.** At most one active claim per task; stale
-  claims are swept on each claim attempt; humans can force-release.
-- **Workflow gate:** `queue → work → review → done`. Agents cannot self-approve.
+- **Claim = atomic lock with TTL.** At most one active claim per task; the
+  holder extends it with `task renew`; stale claims are swept on every read
+  and write; humans can force-release.
+- **Workflow gate:** `queue → work → review → done`. Only the claim holder
+  submits (`--summary`, `--ref`, `--evidence` go to the reviewer); a rejection
+  carries a `--reason`. Agents cannot self-approve.
 - **Event log:** every claim/update/transition is appended immutably in the
   same transaction as the mutation.
 

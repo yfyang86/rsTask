@@ -13,6 +13,8 @@ pub mod sync;
 pub use config::Config;
 pub use error::{ConfigError, Error, Result};
 pub use event::{EventId, Signable, StoredEvent};
-pub use models::{Actor, ActorKind, Claim, Event, Module, ReleaseReason, Task, TaskStatus};
+pub use models::{
+    Actor, ActorKind, Claim, Event, Module, ReleaseReason, Submission, Task, TaskStatus,
+};
 pub use store::Store;
 pub use sync::{ActorRow, Bucket, Merge, SyncBundle};

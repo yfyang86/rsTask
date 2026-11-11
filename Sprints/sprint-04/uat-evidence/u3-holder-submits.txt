@@ -1,0 +1,5 @@
+# U3 — only the holder submits
+$ task submit --actor rival-a
+Error: task <id> is already claimed by bot
+exit=1
+status: work   log: ["task.created","task.claimed"]

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use rstask_core::{ActorKind, Config, Event, Store, Task, TaskStatus};
+use rstask_core::{ActorKind, Config, Event, Store, Submission, Task, TaskStatus};
 
 #[derive(Parser)]
 #[command(name = "rstask", about = "Local-first, Markdown-native task workspace")]
@@ -109,11 +109,28 @@ enum TaskCommand {
         #[arg(long)]
         force: bool,
     },
-    /// Work → review. Releases the claim.
+    /// Extend the holder's claim before it expires. Default TTL 15 min.
+    Renew {
+        id: String,
+        #[arg(long)]
+        actor: String,
+        #[arg(long, default_value_t = 900)]
+        ttl_secs: u64,
+    },
+    /// Work → review. Releases the claim; the result goes to the reviewer.
     Submit {
         id: String,
         #[arg(long)]
         actor: String,
+        /// What was done.
+        #[arg(long, default_value = "")]
+        summary: String,
+        /// Where the work is: commit id, PR link, file path (repeatable).
+        #[arg(long = "ref")]
+        refs: Vec<String>,
+        /// Proof it works: test output, as Markdown.
+        #[arg(long, default_value = "")]
+        evidence: String,
     },
     /// Review → done (reviewer approval; agents can't self-approve).
     Approve {
@@ -126,6 +143,9 @@ enum TaskCommand {
         id: String,
         #[arg(long)]
         actor: String,
+        /// What must change, for whoever picks the task up next.
+        #[arg(long)]
+        reason: String,
     },
     /// Show the immutable event log of a task.
     Log {
@@ -208,16 +228,37 @@ async fn main() -> anyhow::Result<()> {
             TaskCommand::Release { id, actor, force } => {
                 store.release_claim(&id, &actor, force).await?;
             }
-            TaskCommand::Submit { id, actor } => {
-                let task = store.submit_for_review(&id, &actor).await?;
+            TaskCommand::Renew {
+                id,
+                actor,
+                ttl_secs,
+            } => {
+                let claim = store
+                    .renew_claim(&id, &actor, Duration::from_secs(ttl_secs))
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&claim)?);
+            }
+            TaskCommand::Submit {
+                id,
+                actor,
+                summary,
+                refs,
+                evidence,
+            } => {
+                let submission = Submission {
+                    summary,
+                    refs,
+                    evidence,
+                };
+                let task = store.submit_for_review(&id, &actor, &submission).await?;
                 println!("{}", serde_json::to_string_pretty(&task)?);
             }
             TaskCommand::Approve { id, actor } => {
                 let task = store.approve(&id, &actor).await?;
                 println!("{}", serde_json::to_string_pretty(&task)?);
             }
-            TaskCommand::Reject { id, actor } => {
-                let task = store.request_changes(&id, &actor).await?;
+            TaskCommand::Reject { id, actor, reason } => {
+                let task = store.request_changes(&id, &actor, &reason).await?;
                 println!("{}", serde_json::to_string_pretty(&task)?);
             }
             TaskCommand::Log { id } => {

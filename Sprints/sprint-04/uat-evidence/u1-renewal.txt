@@ -1,0 +1,9 @@
+# U1 — renewal keeps the claim, everywhere
+$ A: task renew --actor bot --ttl-secs 900
+{"actor_id":"bot","released_at":null}
+$ B (has not seen the renewal): task claim --actor rival
+{"actor_id":"rival"}
+A: status=work  holder renews again -> {"actor_id":"bot"}
+B: status=work  rival submits -> Error: task <id> is already claimed by bot
+A log: ["task.created","task.claimed","task.renewed","task.claimed","task.renewed"]
+B log: ["task.created","task.claimed","task.renewed","task.claimed"]

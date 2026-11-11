@@ -97,6 +97,16 @@ pub struct Claim {
     pub release_reason: Option<ReleaseReason>,
 }
 
+/// What a worker hands to the reviewer with `task.submitted` (PRD-v3 M2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Submission {
+    pub summary: String,
+    /// Commit ids, PR links, file paths — whatever locates the work.
+    pub refs: Vec<String>,
+    /// Test output or other proof, as Markdown.
+    pub evidence: String,
+}
+
 /// Immutable log entry. `seq` is a monotonic AUTOINCREMENT — the event log
 /// is append-only by construction.
 ///

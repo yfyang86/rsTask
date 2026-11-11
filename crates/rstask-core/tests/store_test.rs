@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use rstask_core::{ActorKind, Error, Store, TaskStatus};
+use rstask_core::{ActorKind, Error, Store, Submission, TaskStatus};
 
 async fn setup() -> (Store, String) {
     let store = Store::open_in_memory().await.unwrap();
@@ -97,7 +97,7 @@ async fn workflow_gate_enforced() {
 
     // Cannot submit without claiming first (queue → review is illegal).
     let err = store
-        .submit_for_review(&task.id, &agent.id)
+        .submit_for_review(&task.id, &agent.id, &Submission::default())
         .await
         .unwrap_err();
     assert!(matches!(err, Error::InvalidTransition { .. }));
@@ -107,7 +107,10 @@ async fn workflow_gate_enforced() {
         .claim_task(&task.id, &agent.id, Duration::from_secs(60))
         .await
         .unwrap();
-    store.submit_for_review(&task.id, &agent.id).await.unwrap();
+    store
+        .submit_for_review(&task.id, &agent.id, &Submission::default())
+        .await
+        .unwrap();
     assert_eq!(
         store.get_task(&task.id).await.unwrap().status,
         TaskStatus::Review
@@ -120,7 +123,10 @@ async fn workflow_gate_enforced() {
     );
 
     // Changes can no longer be requested once done.
-    let err = store.request_changes(&task.id, &alice).await.unwrap_err();
+    let err = store
+        .request_changes(&task.id, &alice, "rework")
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::InvalidTransition { .. }));
 }
 
@@ -132,8 +138,14 @@ async fn request_changes_sends_back_to_queue() {
         .claim_task(&task.id, &alice, Duration::from_secs(60))
         .await
         .unwrap();
-    store.submit_for_review(&task.id, &alice).await.unwrap();
-    store.request_changes(&task.id, &alice).await.unwrap();
+    store
+        .submit_for_review(&task.id, &alice, &Submission::default())
+        .await
+        .unwrap();
+    store
+        .request_changes(&task.id, &alice, "rework")
+        .await
+        .unwrap();
     assert_eq!(
         store.get_task(&task.id).await.unwrap().status,
         TaskStatus::Queue
@@ -221,7 +233,10 @@ async fn agent_cannot_approve_own_submission() {
         .claim_task(&task.id, &bot.id, Duration::from_secs(60))
         .await
         .unwrap();
-    store.submit_for_review(&task.id, &bot.id).await.unwrap();
+    store
+        .submit_for_review(&task.id, &bot.id, &Submission::default())
+        .await
+        .unwrap();
 
     let err = store.approve(&task.id, &bot.id).await.unwrap_err();
     assert!(matches!(err, Error::NotPermitted { .. }), "got {err:?}");
@@ -280,5 +295,139 @@ async fn only_humans_force_release() {
         forced.payload.contains("claim_id\":\""),
         "{}",
         forced.payload
+    );
+}
+
+// ---- Sprint 04: claim liveness and handoff (UAT U1–U4) ----
+
+async fn active_claim(store: &Store, task_id: &str) -> Option<rstask_core::Claim> {
+    sqlx::query_as("SELECT * FROM claims WHERE task_id = ? AND released_at IS NULL")
+        .bind(task_id)
+        .fetch_optional(store.pool())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn renew_extends_claim_and_logs_event() {
+    let (store, alice) = setup().await;
+    let task = store.create_task("t", "", &alice).await.unwrap();
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let rival = store.create_actor(ActorKind::Agent, "rival").await.unwrap();
+    let claim = store
+        .claim_task(&task.id, &bot.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+
+    // Only the holder renews.
+    let err = store
+        .renew_claim(&task.id, &rival.id, Duration::from_secs(3600))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::ClaimConflict { .. }), "got {err:?}");
+
+    let renewed = store
+        .renew_claim(&task.id, &bot.id, Duration::from_secs(3600))
+        .await
+        .unwrap();
+    assert_eq!(renewed.id, claim.id);
+    assert!(renewed.expires_at > claim.expires_at);
+    assert_eq!(
+        active_claim(&store, &task.id).await.unwrap().expires_at,
+        renewed.expires_at
+    );
+    let events = store.list_events(&task.id).await.unwrap();
+    let ev = events
+        .iter()
+        .find(|e| e.kind == "task.renewed")
+        .expect("renewal logged");
+    assert!(ev.payload.contains(&claim.id), "{}", ev.payload);
+}
+
+#[tokio::test]
+async fn stale_claim_is_swept_on_read_and_cannot_act() {
+    let (store, alice) = setup().await;
+    let task = store.create_task("t", "", &alice).await.unwrap();
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    store
+        .claim_task(&task.id, &bot.id, Duration::from_secs(0))
+        .await
+        .unwrap();
+
+    // A plain read — no claim attempt — returns the task to the pool.
+    let board = store.board_state().await.unwrap();
+    assert_eq!(board[0].1.len(), 1, "task is back in queue: {board:?}");
+    assert!(active_claim(&store, &task.id).await.is_none());
+
+    let err = store
+        .renew_claim(&task.id, &bot.id, Duration::from_secs(60))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::ClaimExpired(_)), "got {err:?}");
+    let err = store
+        .submit_for_review(&task.id, &bot.id, &Submission::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::ClaimExpired(_)), "got {err:?}");
+    let events = store.list_events(&task.id).await.unwrap();
+    assert_eq!(events.len(), 2, "only created + claimed are logged");
+}
+
+#[tokio::test]
+async fn only_the_holder_submits() {
+    let (store, alice) = setup().await;
+    let task = store.create_task("t", "", &alice).await.unwrap();
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let rival = store.create_actor(ActorKind::Agent, "rival").await.unwrap();
+    store
+        .claim_task(&task.id, &bot.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    let err = store
+        .submit_for_review(&task.id, &rival.id, &Submission::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::ClaimConflict { .. }), "got {err:?}");
+    assert_eq!(
+        store.get_task(&task.id).await.unwrap().status,
+        TaskStatus::Work
+    );
+}
+
+#[tokio::test]
+async fn submission_and_reason_are_logged() {
+    let (store, alice) = setup().await;
+    let task = store.create_task("t", "", &alice).await.unwrap();
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    store
+        .claim_task(&task.id, &bot.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    let submission = Submission {
+        summary: "fixed the fold".into(),
+        refs: vec!["c265568".into(), "PR 12".into()],
+        evidence: "27/27 green".into(),
+    };
+    store
+        .submit_for_review(&task.id, &bot.id, &submission)
+        .await
+        .unwrap();
+    store
+        .request_changes(&task.id, &alice, "missing a test")
+        .await
+        .unwrap();
+
+    let events = store.list_events(&task.id).await.unwrap();
+    let payload = |kind: &str| -> serde_json::Value {
+        let ev = events.iter().find(|e| e.kind == kind).unwrap();
+        serde_json::from_str(&ev.payload).unwrap()
+    };
+    let submitted = payload("task.submitted");
+    assert_eq!(submitted["summary"], "fixed the fold");
+    assert_eq!(submitted["refs"], serde_json::json!(["c265568", "PR 12"]));
+    assert_eq!(submitted["evidence"], "27/27 green");
+    assert_eq!(
+        payload("task.changes_requested")["reason"],
+        "missing a test"
     );
 }

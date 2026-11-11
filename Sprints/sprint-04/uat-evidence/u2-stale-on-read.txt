@@ -1,0 +1,10 @@
+# U2 — a stale claim leaves the board on read
+status right after claim: work
+status after 1.2s, read only: queue
+$ task renew --actor bot
+Error: claim expired for task <id>
+exit=1
+$ task submit --actor bot
+Error: claim expired for task <id>
+exit=1
+log: ["task.created","task.claimed"]

@@ -22,7 +22,7 @@ names() { sed -e "s/$ALICE/alice/g" -e "s/$BOT2/bot2/g" -e "s/$BOT/bot/g" -e "s/
 { echo "# U1 — reject -> re-claim replicates"
   T=$(a task new "u1 rework" --actor "$ALICE" | id)
   a task claim "$T" --actor "$BOT" >/dev/null; a task submit "$T" --actor "$BOT" >/dev/null
-  a task reject "$T" --actor "$ALICE" >/dev/null; a task claim "$T" --actor "$BOT2" >/dev/null
+  a task reject "$T" --actor "$ALICE" --reason rework >/dev/null; a task claim "$T" --actor "$BOT2" >/dev/null
   sync_ab
   echo "A status: $(status a "$T")"; echo "B status: $(status b "$T")"
   echo "B log:    $(kinds b "$T")"
@@ -32,7 +32,7 @@ names() { sed -e "s/$ALICE/alice/g" -e "s/$BOT2/bot2/g" -e "s/$BOT/bot/g" -e "s/
   T=$(a task new "u2 contested" --actor "$ALICE" | id)
   a task claim "$T" --actor "$BOT" >/dev/null; a task submit "$T" --actor "$BOT" >/dev/null
   sync_ab; CAROL=$(b actor new carol --kind human | id)
-  a task approve "$T" --actor "$ALICE" >/dev/null; b task reject "$T" --actor "$CAROL" >/dev/null
+  a task approve "$T" --actor "$ALICE" >/dev/null; b task reject "$T" --actor "$CAROL" --reason rework >/dev/null
   echo "before sync  A: $(status a "$T")  B: $(status b "$T")"
   sync_ab; sync_ba
   echo "after sync   A: $(status a "$T")  B: $(status b "$T")"

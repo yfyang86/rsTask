@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use rstask_core::sync::{decode_bundle, encode_bundle};
-use rstask_core::{ActorKind, Store, TaskStatus};
+use rstask_core::{ActorKind, Store, Submission, TaskStatus};
 
 async fn store() -> Store {
     Store::open_in_memory().await.expect("open")
@@ -76,7 +76,9 @@ async fn u2_two_way_convergence_and_idempotent_resync() {
     a.claim_task(&task.id, &alice.id, Duration::from_secs(900))
         .await
         .unwrap();
-    a.submit_for_review(&task.id, &alice.id).await.unwrap();
+    a.submit_for_review(&task.id, &alice.id, &Submission::default())
+        .await
+        .unwrap();
     a.approve(&task.id, &alice.id).await.unwrap();
 
     let bob = b.create_actor(ActorKind::Agent, "bob").await.unwrap();
@@ -162,7 +164,9 @@ async fn u4_shuffled_delivery_parks_and_drains() {
     a.claim_task(&task.id, &alice.id, Duration::from_secs(900))
         .await
         .unwrap();
-    a.submit_for_review(&task.id, &alice.id).await.unwrap();
+    a.submit_for_review(&task.id, &alice.id, &Submission::default())
+        .await
+        .unwrap();
     a.approve(&task.id, &alice.id).await.unwrap();
 
     let b = store().await;
@@ -245,13 +249,17 @@ async fn s03_u1_reject_then_reclaim_replicates() {
     let task = a.create_task("rework", "", &alice.id).await.unwrap();
     let ttl = Duration::from_secs(900);
     a.claim_task(&task.id, &bot.id, ttl).await.unwrap();
-    a.submit_for_review(&task.id, &bot.id).await.unwrap();
+    a.submit_for_review(&task.id, &bot.id, &Submission::default())
+        .await
+        .unwrap();
 
     // B follows along incrementally; C imports everything at the end.
     let b = store().await;
     exchange(&a, &b).await;
 
-    a.request_changes(&task.id, &alice.id).await.unwrap();
+    a.request_changes(&task.id, &alice.id, "rework")
+        .await
+        .unwrap();
     a.claim_task(&task.id, &bot.id, ttl).await.unwrap();
     exchange(&a, &b).await;
     let c = store().await;
@@ -281,7 +289,9 @@ async fn s03_u2_concurrent_approve_and_reject_converge() {
     a.claim_task(&task.id, &bot.id, Duration::from_secs(900))
         .await
         .unwrap();
-    a.submit_for_review(&task.id, &bot.id).await.unwrap();
+    a.submit_for_review(&task.id, &bot.id, &Submission::default())
+        .await
+        .unwrap();
 
     let b = store().await;
     exchange(&a, &b).await;
@@ -289,7 +299,9 @@ async fn s03_u2_concurrent_approve_and_reject_converge() {
 
     // Disconnected reviewers disagree.
     a.approve(&task.id, &alice.id).await.unwrap();
-    b.request_changes(&task.id, &carol.id).await.unwrap();
+    b.request_changes(&task.id, &carol.id, "rework")
+        .await
+        .unwrap();
 
     exchange(&a, &b).await;
     exchange(&b, &a).await;
@@ -324,4 +336,82 @@ async fn s03_u4_force_release_replicates() {
         TaskStatus::Queue
     );
     assert!(active_claims(&b, &task.id).await.is_empty());
+}
+
+// ---- Sprint 04: claim liveness (UAT U1) ----
+
+#[tokio::test]
+async fn s04_u1_renewed_claim_holds_on_every_replica() {
+    let a = store().await;
+    let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
+    let bot = a.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let task = a.create_task("long job", "", &alice.id).await.unwrap();
+    a.claim_task(&task.id, &bot.id, Duration::from_millis(300))
+        .await
+        .unwrap();
+
+    let b = store().await;
+    exchange(&a, &b).await;
+    let rival = b.create_actor(ActorKind::Agent, "rival").await.unwrap();
+
+    // The holder renews on A; B does not hear about it before the original
+    // TTL runs out, so a rival there takes the task in good faith.
+    a.renew_claim(&task.id, &bot.id, Duration::from_secs(900))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    b.claim_task(&task.id, &rival.id, Duration::from_secs(900))
+        .await
+        .unwrap();
+
+    exchange(&a, &b).await;
+    exchange(&b, &a).await;
+    // C never saw the short TTL live: it learns everything after the fact.
+    let c = store().await;
+    exchange(&a, &c).await;
+
+    for (name, s) in [("a", &a), ("b", &b), ("c", &c)] {
+        assert_eq!(
+            active_claims(s, &task.id).await,
+            vec![bot.id.clone()],
+            "{name}: the renewing holder keeps the task"
+        );
+        assert!(boards_equal(&a, s).await, "{name} matches a");
+    }
+    assert_eq!(a.get_task(&task.id).await.unwrap().status, TaskStatus::Work);
+}
+
+#[tokio::test]
+async fn s04_expired_claim_is_displaced_on_every_replica() {
+    let a = store().await;
+    let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
+    let x = a.create_actor(ActorKind::Agent, "x").await.unwrap();
+    let y = a.create_actor(ActorKind::Agent, "y").await.unwrap();
+    let task = a.create_task("abandoned", "", &alice.id).await.unwrap();
+    a.claim_task(&task.id, &x.id, Duration::from_millis(100))
+        .await
+        .unwrap();
+    let b = store().await;
+    exchange(&a, &b).await; // B holds x's claim live
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    a.claim_task(&task.id, &y.id, Duration::from_secs(900))
+        .await
+        .unwrap();
+    exchange(&a, &b).await;
+    let c = store().await;
+    exchange(&a, &c).await;
+
+    for (name, s) in [("b", &b), ("c", &c)] {
+        assert_eq!(
+            active_claims(s, &task.id).await,
+            vec![y.id.clone()],
+            "{name}"
+        );
+        assert!(
+            boards_equal(&a, s).await,
+            "{name} matches a\na: {:?}\n{name}: {:?}",
+            a.list_tasks(None).await.unwrap(),
+            s.list_tasks(None).await.unwrap()
+        );
+    }
 }
