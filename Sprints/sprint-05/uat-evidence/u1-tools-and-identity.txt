@@ -1,0 +1,8 @@
+# U1 — an agent finds its tools and its identity
+server: rstask-mcp
+instructions: RsTask workspace. You act as Agent actor "bot" (bot). Work loop: claim_next -> task_renew while working -> task_complete. Review loop: tasks_list status=review -> task_get -> task_approve or task_reject.
+tools: ["board_state","claim_next","task_approve","task_claim","task_complete","task_create","task_get","task_reject","task_release","task_renew","task_update","tasks_list"]
+tools taking an actor argument: []
+$ rstask-mcp --actor nobody
+Error: actor not found: nobody
+exit=1

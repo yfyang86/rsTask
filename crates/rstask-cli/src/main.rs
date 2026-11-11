@@ -212,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
                 print_task_table(&tasks);
             }
             TaskCommand::Show { id } => {
-                let task = store.get_task(&id).await?;
+                let task = store.task_detail(&id).await?;
                 println!("{}", serde_json::to_string_pretty(&task)?);
             }
             TaskCommand::Claim {

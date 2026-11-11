@@ -14,7 +14,8 @@ pub use config::Config;
 pub use error::{ConfigError, Error, Result};
 pub use event::{EventId, Signable, StoredEvent};
 pub use models::{
-    Actor, ActorKind, Claim, Event, Module, ReleaseReason, Submission, Task, TaskStatus,
+    Actor, ActorKind, Claim, Event, Module, Rejected, ReleaseReason, Submission, Submitted, Task,
+    TaskDetail, TaskStatus,
 };
 pub use store::Store;
 pub use sync::{ActorRow, Bucket, Merge, SyncBundle};

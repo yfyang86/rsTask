@@ -1,0 +1,6 @@
+# U4 — the gate holds over MCP
+reviewer task_update   -> ERROR: task <id> is already claimed by bot
+reviewer task_complete -> ERROR: task <id> is already claimed by bot
+reviewer task_release  -> ERROR: task <id> is already claimed by bot
+bot task_approve (own) -> ERROR: actor bot is not permitted to approve its own submission
+log: ["task.created by alice","task.claimed by bot","task.submitted by bot"]

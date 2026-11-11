@@ -11,7 +11,7 @@ crates/
   rstask-cli     `rstask` binary (clap) — scriptable human ops
   rstask-tui     ratatui kanban view (skeleton)
   rstask-server  axum REST — read-only dashboard API (skeleton)
-  rstask-mcp     MCP agent tools (stub; rmcp lands with the first tool)
+  rstask-mcp     MCP server (rmcp, stdio) — one process per agent
 ```
 
 ## Quick start
@@ -38,10 +38,29 @@ cargo run -p rstask-cli -- board
 - **Event log:** every claim/update/transition is appended immutably in the
   same transaction as the mutation.
 
+## Agents (MCP)
+
+Each agent runs its own server; the actor is fixed at startup, so no tool takes
+an actor argument.
+
+```sh
+BOT=$(rstask actor new bot --kind agent | jq -r .id)
+rstask-mcp --actor "$BOT"          # or RSTASK_ACTOR; --db / --config as the CLI
+```
+
+```json
+{ "mcpServers": { "rstask": { "command": "rstask-mcp", "args": ["--db", "/path/to/rstask.sqlite", "--actor", "<actor id>"] } } }
+```
+
+Tools: `claim_next` (atomically take the next task — highest priority, then
+oldest), `task_renew`, `task_complete`, `task_release`, `task_get`, `tasks_list`,
+`board_state`, `task_create`, `task_update`, `task_claim`, `task_approve`,
+`task_reject`. Errors come back as tool errors carrying core's message.
+
 ## Tests
 
 ```sh
-cargo test -p rstask-core
+cargo test --workspace
 ```
 
 ## Sync (sprint 01)

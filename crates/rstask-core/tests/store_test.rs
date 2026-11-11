@@ -191,7 +191,11 @@ async fn release_without_active_claim_fails() {
         .release_claim(&task.id, &alice, false)
         .await
         .unwrap_err();
-    assert!(matches!(err, Error::ClaimConflict { .. }));
+    // Nobody holds it: there is nothing to release.
+    assert!(
+        matches!(err, Error::InvalidTransition { .. }),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -281,6 +285,12 @@ async fn only_humans_force_release() {
     assert_eq!(
         store.get_task(&task.id).await.unwrap().status,
         TaskStatus::Work
+    );
+
+    // The refusal names the real holder, not the caller.
+    assert!(
+        matches!(&err, Error::ClaimConflict { actor, .. } if *actor == bot.id),
+        "got {err:?}"
     );
 
     // The human's forced release is signed by the human and names the claim.
@@ -430,4 +440,205 @@ async fn submission_and_reason_are_logged() {
         payload("task.changes_requested")["reason"],
         "missing a test"
     );
+}
+
+// ---- Sprint 05: agent interface (UAT U2–U4) ----
+
+#[tokio::test]
+async fn claim_next_takes_highest_priority_then_oldest() {
+    let (store, alice) = setup().await;
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let ttl = Duration::from_secs(60);
+    assert!(store.claim_next(&bot.id, ttl).await.unwrap().is_none());
+
+    let old = store.create_task("old", "", &alice).await.unwrap();
+    let _new = store.create_task("new", "", &alice).await.unwrap();
+    let urgent = store.create_task("urgent", "", &alice).await.unwrap();
+    store
+        .update_task(&urgent.id, None, None, Some(5), &alice)
+        .await
+        .unwrap();
+
+    let first = store.claim_next(&bot.id, ttl).await.unwrap().unwrap();
+    assert_eq!(first.task_id, urgent.id);
+    assert_eq!(first.actor_id, bot.id);
+    let second = store.claim_next(&bot.id, ttl).await.unwrap().unwrap();
+    assert_eq!(second.task_id, old.id);
+    assert_eq!(
+        store.get_task(&urgent.id).await.unwrap().status,
+        TaskStatus::Work
+    );
+    let events = store.list_events(&urgent.id).await.unwrap();
+    assert!(events.iter().any(|e| e.kind == "task.claimed"));
+}
+
+#[tokio::test]
+async fn claim_next_race_hands_out_distinct_tasks() {
+    let path = std::env::temp_dir().join(format!("rstask-race-{}.sqlite", uuid::Uuid::new_v4()));
+    let store = std::sync::Arc::new(Store::open(&path).await.unwrap());
+    let alice = store.create_actor(ActorKind::Human, "alice").await.unwrap();
+    for i in 0..3 {
+        store
+            .create_task(&format!("t{i}"), "", &alice.id)
+            .await
+            .unwrap();
+    }
+    let mut agents = Vec::new();
+    for i in 0..8 {
+        let name = format!("bot{i}");
+        agents.push(store.create_actor(ActorKind::Agent, &name).await.unwrap());
+    }
+    let mut handles = Vec::new();
+    for agent in agents {
+        let store = store.clone();
+        handles.push(tokio::spawn(async move {
+            store
+                .claim_next(&agent.id, Duration::from_secs(60))
+                .await
+                .unwrap()
+        }));
+    }
+    let mut won = Vec::new();
+    for h in handles {
+        if let Some(claim) = h.await.unwrap() {
+            won.push(claim.task_id);
+        }
+    }
+    won.sort();
+    won.dedup();
+    assert_eq!(won.len(), 3, "three distinct tasks handed out");
+    assert!(store
+        .list_tasks(Some(TaskStatus::Queue))
+        .await
+        .unwrap()
+        .is_empty());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn update_needs_the_holder_while_claimed() {
+    let (store, alice) = setup().await;
+    let task = store.create_task("t", "", &alice).await.unwrap();
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let rival = store.create_actor(ActorKind::Agent, "rival").await.unwrap();
+
+    let err = store
+        .update_task("no-such-task", Some("x"), None, None, &alice)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::TaskNotFound(_)), "got {err:?}");
+
+    // Unclaimed: anyone may edit (planning).
+    store
+        .update_task(&task.id, None, Some("plan"), None, &rival.id)
+        .await
+        .unwrap();
+    store
+        .claim_task(&task.id, &bot.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    let err = store
+        .update_task(&task.id, None, Some("hijack"), None, &rival.id)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::ClaimConflict { .. }), "got {err:?}");
+    let updated = store
+        .update_task(&task.id, None, Some("notes"), None, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(updated.body_md, "notes");
+}
+
+#[tokio::test]
+async fn task_detail_carries_claim_and_handoff() {
+    let (store, alice) = setup().await;
+    let task = store.create_task("t", "", &alice).await.unwrap();
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let ttl = Duration::from_secs(60);
+
+    let d = store.task_detail(&task.id).await.unwrap();
+    assert!(d.claim.is_none() && d.submission.is_none() && d.rejection.is_none());
+
+    store.claim_task(&task.id, &bot.id, ttl).await.unwrap();
+    let d = store.task_detail(&task.id).await.unwrap();
+    assert_eq!(d.claim.unwrap().actor_id, bot.id);
+
+    let submission = Submission {
+        summary: "done".into(),
+        refs: vec!["abc123".into()],
+        evidence: "green".into(),
+    };
+    store
+        .submit_for_review(&task.id, &bot.id, &submission)
+        .await
+        .unwrap();
+    store
+        .request_changes(&task.id, &alice, "add a test")
+        .await
+        .unwrap();
+
+    let d = store.task_detail(&task.id).await.unwrap();
+    assert_eq!(d.task.status, TaskStatus::Queue);
+    assert!(d.claim.is_none());
+    let s = d.submission.unwrap();
+    assert_eq!(
+        (s.by.as_str(), &s.submission),
+        (bot.id.as_str(), &submission)
+    );
+    let r = d.rejection.unwrap();
+    assert_eq!(
+        (r.by.as_str(), r.reason.as_str()),
+        (alice.as_str(), "add a test")
+    );
+}
+
+#[tokio::test]
+async fn concurrent_writers_never_see_a_locked_database() {
+    let path = std::env::temp_dir().join(format!("rstask-busy-{}.sqlite", uuid::Uuid::new_v4()));
+    let store = std::sync::Arc::new(Store::open(&path).await.unwrap());
+    let alice = store.create_actor(ActorKind::Human, "alice").await.unwrap();
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let ttl = Duration::from_secs(60);
+    let mut in_review = Vec::new();
+    for i in 0..8 {
+        let t = store
+            .create_task(&format!("r{i}"), "", &alice.id)
+            .await
+            .unwrap();
+        store.claim_task(&t.id, &bot.id, ttl).await.unwrap();
+        store
+            .submit_for_review(&t.id, &bot.id, &Submission::default())
+            .await
+            .unwrap();
+        in_review.push(t.id);
+        store
+            .create_task(&format!("q{i}"), "", &alice.id)
+            .await
+            .unwrap();
+    }
+    // Reviewers approve while workers claim: read-then-write transactions
+    // interleaved with writers.
+    let mut handles = Vec::new();
+    for id in in_review {
+        let (s, alice, bot) = (store.clone(), alice.id.clone(), bot.id.clone());
+        handles.push(tokio::spawn(async move {
+            s.approve(&id, &alice).await.map(|_| ())
+        }));
+        let s = store.clone();
+        handles.push(tokio::spawn(async move {
+            s.claim_next(&bot, ttl).await.map(|_| ())
+        }));
+    }
+    for h in handles {
+        h.await.unwrap().expect("no writer is turned away");
+    }
+    assert_eq!(
+        store
+            .list_tasks(Some(TaskStatus::Done))
+            .await
+            .unwrap()
+            .len(),
+        8
+    );
+    let _ = std::fs::remove_file(&path);
 }

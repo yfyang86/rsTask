@@ -1,0 +1,7 @@
+# U3 — a full worker -> reviewer loop over MCP
+bot claim_next -> {"title":"u3 ship it","status":"work","holder":"bot"}
+bot task_renew -> {"actor_id":"bot","release_reason":null}
+reviewer task_get -> {"status":"review","submission":{"by":"bot","summary":"did the thing","refs":["abc123"],"evidence":"38/38 green"}}
+bot claim_next again -> {"title":"u3 ship it","rejection":{"by":"reviewer","reason":"add a test"}}
+reviewer task_approve -> done
+log: ["task.created by alice","task.claimed by bot","task.renewed by bot","task.updated by bot","task.submitted by bot","task.changes_requested by reviewer","task.claimed by bot","task.submitted by bot","task.approved by reviewer"]

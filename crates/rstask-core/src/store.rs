@@ -20,7 +20,10 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::event::{EventId, Signable, StoredEvent};
-use crate::models::{Actor, ActorKind, Claim, Event, ReleaseReason, Submission, Task, TaskStatus};
+use crate::models::{
+    Actor, ActorKind, Claim, Event, Rejected, ReleaseReason, Submission, Submitted, Task,
+    TaskDetail, TaskStatus,
+};
 use crate::sync::{ActorRow, Bucket, Merge, SyncBundle, BUCKET};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
@@ -103,6 +106,14 @@ impl Store {
         &self.pool
     }
 
+    /// Every mutation runs in a `BEGIN IMMEDIATE` transaction: it takes the
+    /// write lock up front and waits its turn. A deferred transaction that
+    /// reads first is refused outright (`database is locked`) if another
+    /// writer commits before its first write.
+    async fn begin_write(&self) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>> {
+        Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
+    }
+
     // ---------------------------------------------------------------- actors
 
     pub async fn create_actor(&self, kind: ActorKind, name: &str) -> Result<Actor> {
@@ -176,7 +187,7 @@ impl Store {
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         sqlx::query(
             "INSERT INTO tasks (id, title, body_md, status, created_by, created_at, updated_at)
              VALUES (?, ?, ?, 'queue', ?, ?, ?)",
@@ -208,7 +219,7 @@ impl Store {
     /// Return stale claims' tasks to the pool, so reads never show dead
     /// `work` (PRD-v3 M1).
     async fn sweep_expired(&self) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         sweep_expired_tx(&mut tx, Utc::now()).await?;
         tx.commit().await?;
         Ok(())
@@ -221,6 +232,60 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?
             .ok_or_else(|| Error::TaskNotFound(id.to_string()))
+    }
+
+    /// The task plus its live claim and the latest handoff each way.
+    pub async fn task_detail(&self, id: &str) -> Result<TaskDetail> {
+        let task = self.get_task(id).await?;
+        let claim = sqlx::query_as::<_, Claim>(
+            "SELECT * FROM claims WHERE task_id = ? AND released_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let submission = self
+            .latest_event(id, "task.submitted")
+            .await?
+            .map(|(by, at, p)| Submitted {
+                by,
+                at,
+                submission: serde_json::from_value(p).unwrap_or_default(),
+            });
+        let rejection =
+            self.latest_event(id, "task.changes_requested")
+                .await?
+                .map(|(by, at, p)| Rejected {
+                    by,
+                    at,
+                    reason: p["reason"].as_str().unwrap_or("").to_string(),
+                });
+        Ok(TaskDetail {
+            task,
+            claim,
+            submission,
+            rejection,
+        })
+    }
+
+    /// Actor, time and payload of the task's latest event of `kind`.
+    async fn latest_event(
+        &self,
+        task_id: &str,
+        kind: &str,
+    ) -> Result<Option<(String, DateTime<Utc>, serde_json::Value)>> {
+        let row: Option<(String, DateTime<Utc>, String)> = sqlx::query_as(
+            "SELECT actor_id, at, payload FROM events
+             WHERE task_id = ? AND kind = ? AND event_id IS NOT NULL
+             ORDER BY lamport DESC, event_id DESC LIMIT 1",
+        )
+        .bind(task_id)
+        .bind(kind)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(by, at, payload)| {
+            let payload = serde_json::from_str(&payload).unwrap_or(json!({}));
+            (by, at, payload)
+        }))
     }
 
     pub async fn list_tasks(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
@@ -243,8 +308,8 @@ impl Store {
         .map_err(Error::from)
     }
 
-    /// Update title/body/priority. The caller must hold an active claim on
-    /// the task (this is enforced by `task_update` in the MCP/agent path).
+    /// Update title/body/priority. While the task is claimed only the holder
+    /// may edit it; otherwise any actor may (planning).
     pub async fn update_task(
         &self,
         id: &str,
@@ -255,7 +320,27 @@ impl Store {
     ) -> Result<Task> {
         let signing_key = self.signing_key(actor_id).await?;
         let now = Utc::now();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
+        sweep_expired_tx(&mut tx, now).await?;
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?)")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !exists {
+            return Err(Error::TaskNotFound(id.to_string()));
+        }
+        let holder: Option<String> = sqlx::query_scalar(
+            "SELECT actor_id FROM claims WHERE task_id = ? AND released_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(holder) = holder.filter(|h| h != actor_id) {
+            return Err(Error::ClaimConflict {
+                task: id.to_string(),
+                actor: holder,
+            });
+        }
         sqlx::query(
             "UPDATE tasks SET
                 title     = COALESCE(?, title),
@@ -308,7 +393,43 @@ impl Store {
     pub async fn claim_task(&self, task_id: &str, actor_id: &str, ttl: Duration) -> Result<Claim> {
         let signing_key = self.signing_key(actor_id).await?;
         let now = Utc::now();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_claim_tx(now).await?;
+        let claim = self
+            .claim_tx(&mut tx, &signing_key, task_id, actor_id, ttl, now)
+            .await?;
+        tx.commit().await?;
+        Ok(claim)
+    }
+
+    /// Atomically claim the next eligible task — highest priority, then
+    /// oldest — so agents never list-then-race (PRD-v3 M3). `None` when the
+    /// queue is empty.
+    pub async fn claim_next(&self, actor_id: &str, ttl: Duration) -> Result<Option<Claim>> {
+        let signing_key = self.signing_key(actor_id).await?;
+        let now = Utc::now();
+        let mut tx = self.begin_claim_tx(now).await?;
+        let next: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM tasks WHERE status = 'queue'
+             ORDER BY priority DESC, created_at LIMIT 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(task_id) = next else {
+            return Ok(None);
+        };
+        let claim = self
+            .claim_tx(&mut tx, &signing_key, &task_id, actor_id, ttl, now)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(claim))
+    }
+
+    /// Open a claim transaction, stale claims swept.
+    async fn begin_claim_tx(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>> {
+        let mut tx = self.begin_write().await?;
 
         // Sweep expired claims (not renewed past TTL → back to pool).
         // Any `work` task left without an active claim returns to `queue`.
@@ -321,10 +442,21 @@ impl Store {
         .bind(now)
         .execute(&mut *tx)
         .await?;
+        Ok(tx)
+    }
 
+    async fn claim_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        signing_key: &SigningKey,
+        task_id: &str,
+        actor_id: &str,
+        ttl: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<Claim> {
         let task_row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
             .bind(task_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
         let Some(task_row) = task_row else {
             return Err(Error::TaskNotFound(task_id.to_string()));
@@ -338,7 +470,7 @@ impl Store {
                     "SELECT actor_id FROM claims WHERE task_id = ? AND released_at IS NULL",
                 )
                 .bind(task_id)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?;
                 if let Some((holder,)) = holder {
                     return Err(Error::ClaimConflict {
@@ -355,7 +487,7 @@ impl Store {
             });
         }
 
-        self.require_actor_tx(&mut tx, actor_id).await?;
+        self.require_actor_tx(tx, actor_id).await?;
 
         let claim = Claim {
             id: Uuid::new_v4().to_string(),
@@ -376,18 +508,18 @@ impl Store {
         .bind(&claim.actor_id)
         .bind(claim.claimed_at)
         .bind(claim.expires_at)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         sqlx::query("UPDATE tasks SET status = 'work', updated_at = ? WHERE id = ?")
             .bind(now)
             .bind(task_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
 
         self.append_event_tx(
-            &mut tx,
-            &signing_key,
+            tx,
+            signing_key,
             actor_id,
             task_id,
             "task.claimed",
@@ -395,8 +527,6 @@ impl Store {
             now,
         )
         .await?;
-
-        tx.commit().await?;
         Ok(claim)
     }
 
@@ -412,40 +542,34 @@ impl Store {
         }
         let signing_key = self.signing_key(actor_id).await?;
         let at = Utc::now();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         sweep_expired_tx(&mut tx, at).await?;
 
-        let claim_id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM claims
-             WHERE task_id = ?1 AND released_at IS NULL AND (?3 OR actor_id = ?2)",
-        )
-        .bind(task_id)
-        .bind(actor_id)
-        .bind(forced)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        let reason = if forced {
-            ReleaseReason::Forced
+        let held: Option<String> = if forced {
+            sqlx::query_scalar("SELECT id FROM claims WHERE task_id = ? AND released_at IS NULL")
+                .bind(task_id)
+                .fetch_optional(&mut *tx)
+                .await?
         } else {
-            ReleaseReason::Released
+            None
         };
-        let res = sqlx::query(
-            "UPDATE claims SET released_at = ?, release_reason = ?
-             WHERE id = ? AND released_at IS NULL",
-        )
-        .bind(at)
-        .bind(reason)
-        .bind(claim_id.as_deref().unwrap_or(""))
-        .execute(&mut *tx)
-        .await?;
-
-        if res.rows_affected() == 0 {
-            return Err(Error::ClaimConflict {
-                task: task_id.to_string(),
-                actor: actor_id.to_string(),
-            });
-        }
+        let (kind, reason) = if forced {
+            ("claim.force_released", ReleaseReason::Forced)
+        } else {
+            ("claim.released", ReleaseReason::Released)
+        };
+        // Nothing to force, or a plain release: the caller's own live claim,
+        // or the error that says who holds the task instead.
+        let claim_id = match held {
+            Some(id) => id,
+            None => require_claim_tx(&mut tx, task_id, actor_id, kind, TaskStatus::Queue).await?,
+        };
+        sqlx::query("UPDATE claims SET released_at = ?, release_reason = ? WHERE id = ?")
+            .bind(at)
+            .bind(reason)
+            .bind(&claim_id)
+            .execute(&mut *tx)
+            .await?;
 
         // If the task was still in `work` because of this claim, return it to
         // the queue so another actor can pick it up.
@@ -463,11 +587,7 @@ impl Store {
             &signing_key,
             actor_id,
             task_id,
-            if forced {
-                "claim.force_released"
-            } else {
-                "claim.released"
-            },
+            kind,
             json!({ "claim_id": claim_id }),
             at,
         )
@@ -483,7 +603,7 @@ impl Store {
         let signing_key = self.signing_key(actor_id).await?;
         let at = Utc::now();
         let expires_at = at + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::MAX);
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         sweep_expired_tx(&mut tx, at).await?;
         let claim_id =
             require_claim_tx(&mut tx, task_id, actor_id, "task.renewed", TaskStatus::Work).await?;
@@ -523,7 +643,7 @@ impl Store {
     ) -> Result<Task> {
         let signing_key = self.signing_key(actor_id).await?;
         let at = Utc::now();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         sweep_expired_tx(&mut tx, at).await?;
         let claim_id = require_claim_tx(
             &mut tx,
@@ -564,7 +684,7 @@ impl Store {
     /// except that an agent cannot approve its own submission (PRD-v3 G2).
     pub async fn approve(&self, task_id: &str, actor_id: &str) -> Result<Task> {
         let signing_key = self.signing_key(actor_id).await?;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         let submitter: Option<String> = sqlx::query_scalar(
             "SELECT actor_id FROM events
              WHERE task_id = ? AND kind = 'task.submitted' AND event_id IS NOT NULL
@@ -607,7 +727,7 @@ impl Store {
         reason: &str,
     ) -> Result<Task> {
         let signing_key = self.signing_key(actor_id).await?;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         self.transition_tx(
             &mut tx,
             &signing_key,
@@ -893,7 +1013,7 @@ impl Store {
     /// parked on missing parents, drained, and applied for their state effect.
     pub async fn receive_bundle(&self, bundle: &SyncBundle) -> Result<Merge> {
         let mut merge = Merge::default();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write().await?;
         for row in &bundle.actors {
             sqlx::query(
                 "INSERT OR IGNORE INTO actors (id, kind, name, created_at) VALUES (?, ?, ?, ?)",

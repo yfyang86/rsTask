@@ -23,7 +23,8 @@ Confirmed by probing the CLI on two replicas unless marked *(read)*.
 | A4 | Claims cannot be kept alive: `renew_claim` has no CLI command and writes no event; `actor heartbeat` updates a column nothing reads. *(read)* | fixed, sprint 04 (the heartbeat column stays unused) |
 | A5 | Merge checks signatures, not authority: any known actor's event is applied (release another's claim by naming its id, approve anything). *(read)* | sprint 07 |
 | A6 | Identity is honour-system: `--actor` is a bare id, secret keys are plaintext in the shared DB, any process can run `actor new --kind human`. *(read)* | sprint 07 |
-| A7 | Smaller: `update_task` has no claim/existence check and no CLI command; the active-claim index is not `UNIQUE`; claim expiry is judged by the wall clock at merge time; concurrent `task.updated` is last-arrival-wins. *(read)* | backlog |
+| A7 | Smaller: `update_task` has no claim/existence check and no CLI command; the active-claim index is not `UNIQUE`; claim expiry is judged by the wall clock at merge time; concurrent `task.updated` is last-arrival-wins. *(read)* | `update_task` checks: sprint 05; expiry: sprint 04; rest backlog |
+| A8 | Found in sprint 05: write transactions that read before writing were refused with `database is locked` whenever another writer committed in between (reviewers approving while workers claim). | fixed, sprint 05 (`BEGIN IMMEDIATE`) |
 
 What already holds: 20 processes racing for one claim on a shared DB gave exactly one
 winner and 19 clean `ClaimConflict` errors.
@@ -42,7 +43,7 @@ winner and 19 clean `ClaimConflict` errors.
 |---|-------------|
 | M1 | `task.renewed` as a signed event; `rstask task renew`; sweep stale claims on read so the board never shows dead `work`. A claim is live in `[claimed_at, expires_at)`, judged against event times, not the merging replica's clock; a renewal the holder made before the claim lapsed always counts, wherever it sorts in the log. |
 | M2 | Results on submit: `task.submitted` carries `summary`, `refs` (commit/PR/path) and `evidence`; `task.changes_requested` carries a `reason`. Only the holder of a live claim submits. |
-| M3 | MCP server (`rmcp`) over `Store`: `tasks_list`, `task_get` (with the latest submission and rejection reason), `task_claim`, `task_renew`, `task_update`, `task_complete`, `board_state`, plus **`claim_next`** — atomically take the highest-priority eligible task, so agents do not list-then-race. |
+| M3 | MCP server (`rmcp`, stdio) over `Store`, one process per agent with the actor fixed at startup — no tool takes an actor. Tools: `tasks_list`, `task_get` (with the holder, the latest submission and the latest rejection reason), `board_state`, `task_create`, `task_claim`, `task_renew`, `task_release`, `task_update`, `task_complete`, `task_approve`, `task_reject`, plus **`claim_next`** — atomically take the highest-priority eligible task, so agents do not list-then-race. |
 | M4 | Dependencies and subtasks: `blocked_by` and `parent` links; a task is eligible only when its blockers are `done`. |
 | M5 | Roles (planner / worker / reviewer) on actors, used for routing and for who may review. |
 
@@ -66,7 +67,7 @@ Agents must not review each other unattended until these hold.
 | 02 | iroh transport | planned, **deferred** behind 07 — one shared SQLite file already serves many agents on one host |
 | 03 | Gate correctness: A1–A3 / G1–G3 | done |
 | 04 | Claim liveness and handoff: M1, M2 | done |
-| 05 | MCP server with `claim_next`: M3 | planned |
+| 05 | MCP server with `claim_next`: M3 | done |
 | 06 | Dependencies and roles: M4, M5 | planned |
 | 07 | Keys and authority: R1–R5, A5, A6 | planned |
 

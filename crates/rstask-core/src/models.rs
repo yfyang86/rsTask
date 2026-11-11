@@ -99,12 +99,41 @@ pub struct Claim {
 
 /// What a worker hands to the reviewer with `task.submitted` (PRD-v3 M2).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Submission {
     pub summary: String,
     /// Commit ids, PR links, file paths — whatever locates the work.
     pub refs: Vec<String>,
     /// Test output or other proof, as Markdown.
     pub evidence: String,
+}
+
+/// The latest `task.submitted` on a task.
+#[derive(Debug, Clone, Serialize)]
+pub struct Submitted {
+    pub by: String,
+    pub at: DateTime<Utc>,
+    #[serde(flatten)]
+    pub submission: Submission,
+}
+
+/// The latest `task.changes_requested` on a task.
+#[derive(Debug, Clone, Serialize)]
+pub struct Rejected {
+    pub by: String,
+    pub at: DateTime<Utc>,
+    pub reason: String,
+}
+
+/// A task with what an actor needs to pick it up or review it: who holds it
+/// and the latest handoff in each direction (PRD-v3 M3).
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskDetail {
+    #[serde(flatten)]
+    pub task: Task,
+    pub claim: Option<Claim>,
+    pub submission: Option<Submitted>,
+    pub rejection: Option<Rejected>,
 }
 
 /// Immutable log entry. `seq` is a monotonic AUTOINCREMENT — the event log
