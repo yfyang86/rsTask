@@ -21,6 +21,15 @@ pub enum Error {
         to: String,
     },
 
+    #[error("actor {actor} is not permitted to {action}")]
+    NotPermitted { actor: String, action: String },
+
+    #[error("task {task} is blocked until these are done: {by}")]
+    Blocked { task: String, by: String },
+
+    #[error("task {task} cannot wait on {by}: that would be a cycle")]
+    DependencyCycle { task: String, by: String },
+
     #[error("claim expired for task {0}")]
     ClaimExpired(String),
 
@@ -36,8 +45,23 @@ pub enum Error {
     #[error("invalid event {id}: {reason}")]
     InvalidEvent { id: String, reason: String },
 
-    #[error("actor {0} has no signing key (pre-sync actor or learned from a peer)")]
+    #[error("no signing key for actor {0} in this key directory")]
     NoSigningKey(String),
+
+    #[error("key does not belong to actor {0}")]
+    KeyMismatch(String),
+
+    #[error(
+        "task {task} was resubmitted: you reviewed {reviewed}, the current submission is {current}"
+    )]
+    StaleApproval {
+        task: String,
+        reviewed: String,
+        current: String,
+    },
+
+    #[error("network: {0}")]
+    Net(String),
 
     #[error("invalid sync bundle: {0}")]
     InvalidBundle(String),

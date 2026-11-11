@@ -1,0 +1,8 @@
+# U4 — wrong token refused
+$ C (a different token): p2p sync <A's spec>
+{"error":"network: peer does not hold this workspace's token","peer":"NODE_A@127.0.0.1:<port>"}
+Error: 1 of 1 peers failed
+exit=1
+A before/after: {"events":8} / {"events":8}   C before/after: {"events":2} / {"events":2}
+$ no token at all: p2p sync
+Error: network: no workspace token: set p2p.token or RSTASK_P2P_TOKEN

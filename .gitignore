@@ -55,3 +55,6 @@ Thumbs.db
 
 *.tsbuildinfo
 
+
+# RsTask workspace: database and secret keys
+.rstask/

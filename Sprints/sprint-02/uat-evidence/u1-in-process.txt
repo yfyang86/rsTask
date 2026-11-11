@@ -1,0 +1,5 @@
+# U1 — in-process two-node sync (automated)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test u1_two_nodes_converge_over_quic ... ok
+test u4_wrong_token_is_refused_before_any_exchange ... ok
+test u5_unreachable_peer_fails_in_bounded_time ... ok

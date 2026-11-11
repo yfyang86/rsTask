@@ -1,0 +1,9 @@
+# U1 — a blocked task waits for its blocker
+claim_next -> build
+$ A: task claim deploy
+Error: task deploy is blocked until these are done: build
+$ B (imported the bundle): task claim deploy
+Error: task deploy is blocked until these are done: build
+task show deploy -> {"status":"queue","priority":9,"blocked_by":["build"],"waiting_on":["build"]}
+build is done; claim_next -> deploy
+task show deploy -> {"status":"work","blocked_by":["build"],"waiting_on":[]}

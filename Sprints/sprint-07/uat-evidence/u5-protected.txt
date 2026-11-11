@@ -1,0 +1,5 @@
+# U5 — protected tasks need a human
+$ task protect -> {"title":"u5 change the gate","protected":true}
+rev (agent, reviewer role) task_approve -> ERROR: actor rev is not permitted to approve a protected task (humans only)
+status: review
+alice task approve -> done

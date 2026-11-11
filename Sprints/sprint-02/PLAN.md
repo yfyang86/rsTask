@@ -1,5 +1,7 @@
 # Sprint 02 — iroh transport (plan)
 
+> Run after sprint 07 (PRD-v3 re-sequencing). Deviations from this plan are listed in `REPORT.md`.
+
 > PRD refs: §Decisions D1 D6 D7 · PRD: `PRD/PRD-v2.md` · Depends on: sprint-01
 
 ## Goal (one sentence)
@@ -33,8 +35,8 @@ rekey/rotation, attachment transfer.
 ## Loop
 
 ### 1. Investigate
-- [ ] cSharing `net.rs` session/handshake/sync_with + `session.rs` probes.
-- [ ] iroh 1.3 API surface vs cSharing pin (Endpoint/Router/ProtocolHandler).
+- [x] cSharing `net.rs` session/handshake/sync_with + `session.rs` probes.
+- [x] iroh 1.3 API surface vs cSharing pin (Endpoint/Router/ProtocolHandler).
 
 ### 2. Setup UAT → `UAT.md`
 U1 in-process two-node sync (relay disabled); U2 loopback CLI sync; U3 LAN by hand;
@@ -42,8 +44,8 @@ U4 wrong-token refusal; U5 unknown-peer handling.
 
 ### 3. Development — per Deliverables below.
 ### 4. Test
-- [ ] `cargo test -p rstask-core` net tests with in-process endpoints, relay disabled.
-- [ ] `cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace`.
+- [x] `cargo test -p rstask-core` net tests with in-process endpoints, relay disabled.
+- [x] `cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace`.
 ### 5. Fix / investigate — triage, re-loop.
 ### 6. Plan next — REPORT.md; carry debt (daemon? attachments?) to backlog.
 
@@ -53,9 +55,9 @@ U4 wrong-token refusal; U5 unknown-peer handling.
 - CLI `rstask p2p` subcommands
 
 ## Definition of Done
-- [ ] Two in-process nodes converge over QUIC with relay disabled (test).
-- [ ] Two CLI workspaces on one host sync via `rstask p2p sync` (UAT transcript).
-- [ ] Wrong token → refused before any event exchange.
+- [x] Two in-process nodes converge over QUIC with relay disabled (test).
+- [x] Two CLI workspaces on one host sync via `rstask p2p sync` (UAT transcript).
+- [x] Wrong token → refused before any event exchange.
 
 ## Risks touched
 - R3 — iroh build cost (~hundreds of crates): keep cSharing's feature pin + dev opt-levels.

@@ -1,0 +1,8 @@
+# U4 — results travel with the submission, reasons with the rejection
+$ task reject --actor alice   (no --reason)
+error: the following required arguments were not provided:
+  --reason <REASON>
+exit=2
+B reads task.submitted:         {"evidence":"cargo test: 33/33 green","refs":["c265568","crates/rstask-core/src/store.rs"],"summary":"fold now derives status"}
+B reads task.changes_requested: {"reason":"add a test for the tie-break"}
+B status: queue

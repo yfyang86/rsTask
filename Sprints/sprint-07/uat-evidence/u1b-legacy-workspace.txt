@@ -1,0 +1,10 @@
+# U1b — a workspace created by the sprint-06 binary
+$ new binary: task list
+id        status    prio   title
+ceaa7b3f  queue  0      made before sprint 07
+key directory after first open: alice.key 
+database files holding alice's secret: before 1, after 0
+$ new binary: task claim (alice still signs)
+{"actor_id":"alice"}
+$ new binary: actor new bot (provisioned by the oldest human)
+{"name":"bot","kind":"agent"}

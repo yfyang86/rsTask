@@ -10,7 +10,7 @@ name = "rstask"
 path = "src/main.rs"
 
 [dependencies]
-rstask-core.workspace = true
+rstask-core = { workspace = true, features = ["net"] }
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

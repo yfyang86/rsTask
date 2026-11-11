@@ -20,3 +20,9 @@ postcard.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
 hex.workspace = true
+iroh = { workspace = true, optional = true }
+
+[features]
+# iroh QUIC transport (`net.rs`). Off by default: only the CLI turns it on, so
+# the MCP server, REST server and TUI do not build the network stack.
+net = ["dep:iroh"]

@@ -1,0 +1,8 @@
+# U5 — unknown peer
+$ B: p2p sync <an id nobody serves>@127.0.0.1:<port>
+{"error":"network: connection timed out","peer":"NODE_NOBODY@127.0.0.1:<port>"}
+Error: 1 of 1 peers failed
+exit=1
+gave up within 15s: yes   B before/after: {"events":8} / {"events":8}
+$ B: p2p sync not-an-id
+Error: network: invalid endpoint id: invalid length

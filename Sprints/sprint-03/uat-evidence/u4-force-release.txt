@@ -1,0 +1,9 @@
+# U4 — human force-release
+$ task release --force --actor bot2
+Error: actor bot2 is not permitted to force-release a claim (humans only)
+exit=1
+$ task release --force --actor alice
+exit=0
+A status: queue
+B status: queue
+{"kind":"claim.force_released","actor_id":"alice","payload":"{\"claim_id\":\"b48e7203-c33f-4b5f-bda2-13ac6d4c6019\"}"}

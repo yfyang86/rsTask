@@ -34,9 +34,9 @@ Evidence: stderr + exit code.
 
 ## Commands under test
 ```sh
-rstask p2p listen                  # print node id + addr (or run a one-shot accept)
+rstask p2p listen [--bind ADDR]    # serve until interrupted; prints {"node","spec","relay"}
 rstask p2p peer add ID@HOST:PORT
 rstask p2p peer list
 rstask p2p sync [ID@HOST:PORT]     # default: all known peers
-rstask p2p status                  # node id, relay mode, peers
+rstask p2p status                  # node id, relay mode, token set/unset, peers
 ```

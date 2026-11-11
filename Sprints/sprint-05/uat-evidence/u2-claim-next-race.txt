@@ -1,0 +1,12 @@
+# U2 — claim_next hands out distinct tasks under a race
+lone agent first: p5 urgent
+racer1: p5 urgent
+racer2: null
+racer3: null
+racer4: p0 oldest
+racer5: null
+racer6: null
+racer7: null
+racer8: p1 soon
+distinct tasks handed out: 3
+left in queue: 0

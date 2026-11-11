@@ -85,8 +85,8 @@ token = ""                  # workspace token; env RSTASK_P2P_TOKEN (sprint 02)
 
 | Sprint | Theme | Status |
 |-------:|-------|--------|
-| 01 | Event DAG + offline reconciliation (in-process / file sync: `rstask sync export\|import`), claim-conflict rule | this loop |
-| 02 | iroh transport: handshake, protocol, `rstask p2p` commands, relay config | planned |
+| 01 | Event DAG + offline reconciliation (in-process / file sync: `rstask sync export\|import`), claim-conflict rule | done |
+| 02 | iroh transport: handshake, protocol, `rstask p2p` commands, relay config | done (after sprint 07; see `Sprints/sprint-02/REPORT.md` for what changed from this design: no `Actors` message — actors are events since PRD-v3 R3; `net.rs` behind the `net` feature) |
 
 ## Deferred (updated from v1)
 

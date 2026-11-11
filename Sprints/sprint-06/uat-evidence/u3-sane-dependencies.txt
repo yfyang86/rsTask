@@ -1,0 +1,12 @@
+# U3 — dependencies must make sense
+$ task block a --by a
+Error: task a cannot wait on a: that would be a cycle
+$ task block a --by nosuch
+Error: task not found: nosuch
+$ task block c --by a   (a waits on b, b waits on c)
+Error: task c cannot wait on a: that would be a cycle
+c log: ["task.created"]
+$ task claim a
+Error: task a is blocked until these are done: b
+$ task unblock a --by b; task claim a -> bot
+a log: ["task.created","task.blocked","task.unblocked","task.claimed"]

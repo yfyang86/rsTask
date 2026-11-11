@@ -7,6 +7,7 @@ cors_origins = ["http://localhost:3000"]
 [auth]
 mode = "offline"           # offline | oidc
 key_algorithm = "ed25519"  # default; RSA only for legacy
+# key_dir = ".rstask/keys" # actor secret keys; default: keys/ beside the database
 
 [storage]
 db_path = ".rstask/rstask.sqlite"
@@ -14,5 +15,8 @@ markdown_root = ".rstask/content"
 attachment_root = ".rstask/attachments"
 
 [p2p]
-enabled = false            # off by default
+enabled = false            # reserved: the `rstask p2p` commands are the switch
 transport = "quic"
+relay = "default"          # default | disabled | https://your-relay…
+# token = ""               # shared workspace token; prefer env RSTASK_P2P_TOKEN
+# bind = "0.0.0.0:7701"    # fixed UDP socket for `p2p listen`
