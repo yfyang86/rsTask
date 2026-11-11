@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use rstask_core::{ActorKind, Config, Event, Store, Submission, Task, TaskStatus};
+use rstask_core::{ActorKind, Config, Event, Role, Store, Submission, Task, TaskStatus};
 
 #[derive(Parser)]
 #[command(name = "rstask", about = "Local-first, Markdown-native task workspace")]
@@ -64,6 +64,9 @@ enum ActorCommand {
         name: String,
         #[arg(long, value_enum, default_value = "human")]
         kind: KindArg,
+        /// Limit the actor to these roles (repeatable); none given means all.
+        #[arg(long = "role", value_enum)]
+        roles: Vec<RoleArg>,
     },
     Heartbeat {
         id: String,
@@ -76,6 +79,13 @@ enum KindArg {
     Agent,
 }
 
+#[derive(clap::ValueEnum, Clone)]
+enum RoleArg {
+    Planner,
+    Worker,
+    Reviewer,
+}
+
 #[derive(Subcommand)]
 enum TaskCommand {
     New {
@@ -83,6 +93,26 @@ enum TaskCommand {
         #[arg(long, default_value = "")]
         body: String,
         /// Actor creating the task.
+        #[arg(long)]
+        actor: String,
+        /// Make it a subtask: the parent waits until its subtasks are done.
+        #[arg(long)]
+        parent: Option<String>,
+    },
+    /// Make a task wait until another is done.
+    Block {
+        id: String,
+        /// The task that must be done first.
+        #[arg(long)]
+        by: String,
+        #[arg(long)]
+        actor: String,
+    },
+    /// Withdraw a dependency added with `block`.
+    Unblock {
+        id: String,
+        #[arg(long)]
+        by: String,
         #[arg(long)]
         actor: String,
     },
@@ -190,12 +220,20 @@ async fn main() -> anyhow::Result<()> {
             println!("initialized {}", db.display());
         }
         Command::Actor { command } => match command {
-            ActorCommand::New { name, kind } => {
+            ActorCommand::New { name, kind, roles } => {
                 let kind = match kind {
                     KindArg::Human => ActorKind::Human,
                     KindArg::Agent => ActorKind::Agent,
                 };
-                let actor = store.create_actor(kind, &name).await?;
+                let roles: Vec<Role> = roles
+                    .into_iter()
+                    .map(|r| match r {
+                        RoleArg::Planner => Role::Planner,
+                        RoleArg::Worker => Role::Worker,
+                        RoleArg::Reviewer => Role::Reviewer,
+                    })
+                    .collect();
+                let actor = store.create_actor_with_roles(kind, &name, &roles).await?;
                 println!("{}", serde_json::to_string_pretty(&actor)?);
             }
             ActorCommand::Heartbeat { id } => {
@@ -203,9 +241,23 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::Task { command } => match command {
-            TaskCommand::New { title, body, actor } => {
-                let task = store.create_task(&title, &body, &actor).await?;
+            TaskCommand::New {
+                title,
+                body,
+                actor,
+                parent,
+            } => {
+                let task = match parent {
+                    Some(parent) => store.create_subtask(&parent, &title, &body, &actor).await?,
+                    None => store.create_task(&title, &body, &actor).await?,
+                };
                 println!("{}", serde_json::to_string_pretty(&task)?);
+            }
+            TaskCommand::Block { id, by, actor } => {
+                store.add_dependency(&id, &by, &actor).await?;
+            }
+            TaskCommand::Unblock { id, by, actor } => {
+                store.remove_dependency(&id, &by, &actor).await?;
             }
             TaskCommand::List { status } => {
                 let tasks = store.list_tasks(status.map(Into::into)).await?;

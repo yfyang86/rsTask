@@ -35,6 +35,10 @@ cargo run -p rstask-cli -- board
 - **Workflow gate:** `queue → work → review → done`. Only the claim holder
   submits (`--summary`, `--ref`, `--evidence` go to the reviewer); a rejection
   carries a `--reason`. Agents cannot self-approve.
+- **Dependencies:** `task block A --by B` and `task new --parent P` — a task is
+  claimable only when its blockers and subtasks are `done`; cycles are refused.
+- **Roles:** `actor new --role planner|worker|reviewer` (repeatable) limits an
+  actor to planning, claiming or reviewing; without `--role` it holds all three.
 - **Event log:** every claim/update/transition is appended immutably in the
   same transaction as the mutation.
 
@@ -54,8 +58,9 @@ rstask-mcp --actor "$BOT"          # or RSTASK_ACTOR; --db / --config as the CLI
 
 Tools: `claim_next` (atomically take the next task — highest priority, then
 oldest), `task_renew`, `task_complete`, `task_release`, `task_get`, `tasks_list`,
-`board_state`, `task_create`, `task_update`, `task_claim`, `task_approve`,
-`task_reject`. Errors come back as tool errors carrying core's message.
+`board_state`, `task_create`, `task_update`, `task_block`, `task_unblock`,
+`task_claim`, `task_approve`, `task_reject`. Errors come back as tool errors
+carrying core's message.
 
 ## Tests
 

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use rstask_core::{ActorKind, Error, Store, Submission, TaskStatus};
+use rstask_core::{ActorKind, Error, Role, Store, Submission, TaskStatus};
 
 async fn setup() -> (Store, String) {
     let store = Store::open_in_memory().await.unwrap();
@@ -641,4 +641,192 @@ async fn concurrent_writers_never_see_a_locked_database() {
         8
     );
     let _ = std::fs::remove_file(&path);
+}
+
+// ---- Sprint 06: dependencies and roles (UAT U1–U4) ----
+
+async fn finish(store: &Store, task_id: &str, worker: &str, reviewer: &str) {
+    store
+        .submit_for_review(task_id, worker, &Submission::default())
+        .await
+        .unwrap();
+    store.approve(task_id, reviewer).await.unwrap();
+}
+
+#[tokio::test]
+async fn blocked_task_waits_for_its_blocker() {
+    let (store, alice) = setup().await;
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let ttl = Duration::from_secs(60);
+    let deploy = store.create_task("deploy", "", &alice).await.unwrap();
+    let build = store.create_task("build", "", &alice).await.unwrap();
+    store
+        .update_task(&deploy.id, None, None, Some(9), &alice)
+        .await
+        .unwrap();
+    store
+        .add_dependency(&deploy.id, &build.id, &alice)
+        .await
+        .unwrap();
+
+    let err = store
+        .claim_task(&deploy.id, &bot.id, ttl)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Blocked { .. }), "got {err:?}");
+    let d = store.task_detail(&deploy.id).await.unwrap();
+    assert_eq!(d.blocked_by, vec![build.id.clone()]);
+    assert_eq!(d.waiting_on, vec![build.id.clone()]);
+
+    // The lower-priority blocker is handed out first.
+    let first = store.claim_next(&bot.id, ttl).await.unwrap().unwrap();
+    assert_eq!(first.task_id, build.id);
+    assert!(store.claim_next(&bot.id, ttl).await.unwrap().is_none());
+    finish(&store, &build.id, &bot.id, &alice).await;
+
+    let next = store.claim_next(&bot.id, ttl).await.unwrap().unwrap();
+    assert_eq!(next.task_id, deploy.id);
+    let d = store.task_detail(&deploy.id).await.unwrap();
+    assert_eq!(d.blocked_by, vec![build.id.clone()]);
+    assert!(d.waiting_on.is_empty());
+}
+
+#[tokio::test]
+async fn dependencies_must_exist_and_not_cycle() {
+    let (store, alice) = setup().await;
+    let a = store.create_task("a", "", &alice).await.unwrap();
+    let b = store.create_task("b", "", &alice).await.unwrap();
+    let c = store.create_task("c", "", &alice).await.unwrap();
+
+    let err = store
+        .add_dependency(&a.id, &a.id, &alice)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::DependencyCycle { .. }), "got {err:?}");
+    let err = store
+        .add_dependency(&a.id, "no-such-task", &alice)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::TaskNotFound(_)), "got {err:?}");
+
+    store.add_dependency(&a.id, &b.id, &alice).await.unwrap();
+    store.add_dependency(&b.id, &c.id, &alice).await.unwrap();
+    let err = store
+        .add_dependency(&c.id, &a.id, &alice)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::DependencyCycle { .. }), "got {err:?}");
+    assert_eq!(store.list_events(&c.id).await.unwrap().len(), 1);
+
+    store.remove_dependency(&a.id, &b.id, &alice).await.unwrap();
+    assert!(store
+        .task_detail(&a.id)
+        .await
+        .unwrap()
+        .blocked_by
+        .is_empty());
+    store
+        .claim_task(&a.id, &alice, Duration::from_secs(60))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn parent_waits_for_its_subtasks() {
+    let (store, alice) = setup().await;
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let ttl = Duration::from_secs(60);
+    let epic = store.create_task("epic", "", &alice).await.unwrap();
+    let s1 = store
+        .create_subtask(&epic.id, "part 1", "", &alice)
+        .await
+        .unwrap();
+    let s2 = store
+        .create_subtask(&epic.id, "part 2", "", &alice)
+        .await
+        .unwrap();
+    assert_eq!(s1.parent_id.as_deref(), Some(epic.id.as_str()));
+    let err = store
+        .create_subtask("no-such-task", "orphan", "", &alice)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::TaskNotFound(_)), "got {err:?}");
+
+    let d = store.task_detail(&epic.id).await.unwrap();
+    assert_eq!(d.children, vec![s1.id.clone(), s2.id.clone()]);
+    assert_eq!(d.waiting_on, vec![s1.id.clone(), s2.id.clone()]);
+
+    // The epic is older, but its parts go first.
+    for part in [&s1, &s2] {
+        let claim = store.claim_next(&bot.id, ttl).await.unwrap().unwrap();
+        assert_eq!(claim.task_id, part.id);
+        finish(&store, &part.id, &bot.id, &alice).await;
+    }
+    let claim = store.claim_next(&bot.id, ttl).await.unwrap().unwrap();
+    assert_eq!(claim.task_id, epic.id);
+}
+
+#[tokio::test]
+async fn roles_gate_planning_working_and_reviewing() {
+    let (store, alice) = setup().await;
+    let ttl = Duration::from_secs(60);
+    let mut agent = Vec::new();
+    for role in [Role::Planner, Role::Worker, Role::Reviewer] {
+        let a = store
+            .create_actor_with_roles(ActorKind::Agent, &role.to_string(), &[role])
+            .await
+            .unwrap();
+        assert_eq!(store.get_actor(&a.id).await.unwrap().roles.0, vec![role]);
+        agent.push(a.id);
+    }
+    let (planner, worker, reviewer) = (&agent[0], &agent[1], &agent[2]);
+    let denied = |r: Result<(), Error>| {
+        let err = r.unwrap_err();
+        assert!(matches!(err, Error::NotPermitted { .. }), "got {err:?}");
+    };
+
+    // Planning.
+    denied(store.create_task("t", "", worker).await.map(|_| ()));
+    denied(store.create_task("t", "", reviewer).await.map(|_| ()));
+    let task = store.create_task("t", "", planner).await.unwrap();
+    let other = store.create_task("other", "", planner).await.unwrap();
+    denied(store.add_dependency(&other.id, &task.id, worker).await);
+    denied(
+        store
+            .update_task(&task.id, Some("x"), None, None, worker)
+            .await
+            .map(|_| ()),
+    );
+    store
+        .add_dependency(&other.id, &task.id, planner)
+        .await
+        .unwrap();
+
+    // Working.
+    denied(store.claim_task(&task.id, planner, ttl).await.map(|_| ()));
+    denied(store.claim_next(reviewer, ttl).await.map(|_| ()));
+    let claim = store.claim_next(worker, ttl).await.unwrap().unwrap();
+    assert_eq!(claim.task_id, task.id);
+    // The holder may edit its own task without being a planner.
+    store
+        .update_task(&task.id, None, Some("notes"), None, worker)
+        .await
+        .unwrap();
+    store
+        .submit_for_review(&task.id, worker, &Submission::default())
+        .await
+        .unwrap();
+
+    // Reviewing.
+    denied(store.approve(&task.id, worker).await.map(|_| ()));
+    denied(
+        store
+            .request_changes(&task.id, planner, "no")
+            .await
+            .map(|_| ()),
+    );
+    store.approve(&task.id, reviewer).await.unwrap();
+
+    // No roles given: every role (alice and the README quick start).
+    assert_eq!(store.get_actor(&alice).await.unwrap().roles.0.len(), 3);
 }

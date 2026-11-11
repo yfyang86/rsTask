@@ -44,8 +44,8 @@ winner and 19 clean `ClaimConflict` errors.
 | M1 | `task.renewed` as a signed event; `rstask task renew`; sweep stale claims on read so the board never shows dead `work`. A claim is live in `[claimed_at, expires_at)`, judged against event times, not the merging replica's clock; a renewal the holder made before the claim lapsed always counts, wherever it sorts in the log. |
 | M2 | Results on submit: `task.submitted` carries `summary`, `refs` (commit/PR/path) and `evidence`; `task.changes_requested` carries a `reason`. Only the holder of a live claim submits. |
 | M3 | MCP server (`rmcp`, stdio) over `Store`, one process per agent with the actor fixed at startup — no tool takes an actor. Tools: `tasks_list`, `task_get` (with the holder, the latest submission and the latest rejection reason), `board_state`, `task_create`, `task_claim`, `task_renew`, `task_release`, `task_update`, `task_complete`, `task_approve`, `task_reject`, plus **`claim_next`** — atomically take the highest-priority eligible task, so agents do not list-then-race. |
-| M4 | Dependencies and subtasks: `blocked_by` and `parent` links; a task is eligible only when its blockers are `done`. |
-| M5 | Roles (planner / worker / reviewer) on actors, used for routing and for who may review. |
+| M4 | Dependencies and subtasks. `task.blocked` / `task.unblocked` events declare that a task waits for another; a subtask names its `parent` at creation. A task is claimable only when every blocker and every subtask is `done`; `claim_next` skips the rest. A dependency that would close a cycle (through blockers or subtasks) is refused. The dependency set is folded per task in log order, so concurrent edits converge. |
+| M5 | Roles on actors — `planner` (create tasks, edit dependencies and unclaimed tasks), `worker` (claim), `reviewer` (approve / reject) — fixed at creation and carried in the actor directory. An actor created without roles holds all three. The holder of a claim may always edit and submit its own task. |
 
 ## RSI preconditions
 
@@ -54,7 +54,7 @@ Agents must not review each other unattended until these hold.
 | # | Precondition |
 |---|--------------|
 | R1 | Keys leave the workspace DB: each agent holds only its own key; humans' keys are out of agents' reach. |
-| R2 | Authority is enforced in the fold (G2, G3, claim ownership on release), not only on the local write path. |
+| R2 | Authority is enforced in the fold (G2, G3, claim ownership on release, roles, claims on blocked tasks), not only on the local write path. |
 | R3 | Actor provisioning is signed by a human root key instead of trust-on-first-use. |
 | R4 | Evidence-bound approval: `task.approved` references the hash of the submitted evidence (M2). |
 | R5 | A protected task class — changes to the gate, the keys or the fold rules — always needs human sign-off. |
@@ -68,7 +68,7 @@ Agents must not review each other unattended until these hold.
 | 03 | Gate correctness: A1–A3 / G1–G3 | done |
 | 04 | Claim liveness and handoff: M1, M2 | done |
 | 05 | MCP server with `claim_next`: M3 | done |
-| 06 | Dependencies and roles: M4, M5 | planned |
+| 06 | Dependencies and roles: M4, M5 | done |
 | 07 | Keys and authority: R1–R5, A5, A6 | planned |
 
 ## Deferred (unchanged from v2)

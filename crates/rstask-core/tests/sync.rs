@@ -415,3 +415,77 @@ async fn s04_expired_claim_is_displaced_on_every_replica() {
         );
     }
 }
+
+// ---- Sprint 06: dependencies and roles replicate (UAT U1, U4) ----
+
+#[tokio::test]
+async fn s06_links_and_roles_replicate() {
+    let a = store().await;
+    let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
+    let worker = a
+        .create_actor_with_roles(ActorKind::Agent, "worker", &[rstask_core::Role::Worker])
+        .await
+        .unwrap();
+    let epic = a.create_task("epic", "", &alice.id).await.unwrap();
+    let part = a
+        .create_subtask(&epic.id, "part", "", &alice.id)
+        .await
+        .unwrap();
+    let deploy = a.create_task("deploy", "", &alice.id).await.unwrap();
+    a.add_dependency(&deploy.id, &part.id, &alice.id)
+        .await
+        .unwrap();
+
+    let b = store().await;
+    exchange(&a, &b).await;
+    let bob = b.create_actor(ActorKind::Agent, "bob").await.unwrap();
+
+    assert!(boards_equal(&a, &b).await, "parent_id rides on the board");
+    let d = b.task_detail(&deploy.id).await.unwrap();
+    assert_eq!(d.blocked_by, vec![part.id.clone()]);
+    assert_eq!(
+        b.task_detail(&epic.id).await.unwrap().children,
+        vec![part.id.clone()]
+    );
+    for blocked in [&deploy.id, &epic.id] {
+        let err = b
+            .claim_task(blocked, &bob.id, Duration::from_secs(60))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, rstask_core::Error::Blocked { .. }),
+            "got {err:?}"
+        );
+    }
+    assert_eq!(
+        b.get_actor(&worker.id).await.unwrap().roles.0,
+        vec![rstask_core::Role::Worker]
+    );
+}
+
+#[tokio::test]
+async fn s06_concurrent_dependency_edits_converge() {
+    let a = store().await;
+    let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
+    let t = a.create_task("t", "", &alice.id).await.unwrap();
+    let x = a.create_task("x", "", &alice.id).await.unwrap();
+    let y = a.create_task("y", "", &alice.id).await.unwrap();
+    a.add_dependency(&t.id, &x.id, &alice.id).await.unwrap();
+    let b = store().await;
+    exchange(&a, &b).await;
+    let carol = b.create_actor(ActorKind::Human, "carol").await.unwrap();
+
+    // Disconnected planners edit the same task's dependencies.
+    a.remove_dependency(&t.id, &x.id, &alice.id).await.unwrap();
+    a.add_dependency(&t.id, &y.id, &alice.id).await.unwrap();
+    b.remove_dependency(&t.id, &x.id, &carol.id).await.unwrap();
+    b.add_dependency(&t.id, &x.id, &carol.id).await.unwrap();
+
+    exchange(&a, &b).await;
+    exchange(&b, &a).await;
+
+    let da = a.task_detail(&t.id).await.unwrap().blocked_by;
+    let db = b.task_detail(&t.id).await.unwrap().blocked_by;
+    assert_eq!(da, db, "replicas agree on the dependency set");
+    assert!(da.contains(&y.id));
+}

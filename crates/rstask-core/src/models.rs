@@ -41,6 +41,57 @@ pub enum ActorKind {
     Agent,
 }
 
+/// What an actor may do (PRD-v3 M5): planners create and shape tasks, workers
+/// claim them, reviewers approve or reject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Planner,
+    Worker,
+    Reviewer,
+}
+
+impl Role {
+    pub const ALL: [Role; 3] = [Role::Planner, Role::Worker, Role::Reviewer];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Role::Planner => "planner",
+            Role::Worker => "worker",
+            Role::Reviewer => "reviewer",
+        }
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// An actor's roles; stored as comma-separated TEXT.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Roles(pub Vec<Role>);
+
+impl From<String> for Roles {
+    fn from(s: String) -> Self {
+        Roles(
+            Role::ALL
+                .into_iter()
+                .filter(|r| s.split(',').any(|part| part == r.as_str()))
+                .collect(),
+        )
+    }
+}
+
+impl std::fmt::Display for Roles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = self.0.iter().map(Role::as_str).collect();
+        f.write_str(&names.join(","))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Type, Serialize, Deserialize)]
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +123,8 @@ pub struct Actor {
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
+    #[sqlx(try_from = "String")]
+    pub roles: Roles,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, PartialEq, Eq)]
@@ -84,6 +137,8 @@ pub struct Task {
     pub created_by: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Set on subtasks; a parent waits for its subtasks.
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
@@ -126,7 +181,7 @@ pub struct Rejected {
 }
 
 /// A task with what an actor needs to pick it up or review it: who holds it
-/// and the latest handoff in each direction (PRD-v3 M3).
+/// the latest handoff in each direction (PRD-v3 M3) and what it waits for.
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskDetail {
     #[serde(flatten)]
@@ -134,6 +189,12 @@ pub struct TaskDetail {
     pub claim: Option<Claim>,
     pub submission: Option<Submitted>,
     pub rejection: Option<Rejected>,
+    /// Tasks this one was declared to wait for (PRD-v3 M4).
+    pub blocked_by: Vec<String>,
+    /// Its subtasks.
+    pub children: Vec<String>,
+    /// Blockers and subtasks not yet `done`: empty means claimable.
+    pub waiting_on: Vec<String>,
 }
 
 /// Immutable log entry. `seq` is a monotonic AUTOINCREMENT — the event log

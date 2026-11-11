@@ -86,6 +86,16 @@ struct CreateArgs {
     title: String,
     /// Markdown body: what to do and how it will be judged.
     body_md: Option<String>,
+    /// Make it a subtask of this task; the parent waits for its subtasks.
+    parent: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct DependencyArgs {
+    /// The task that waits.
+    id: String,
+    /// The task that must be done first.
+    by: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -158,7 +168,7 @@ impl Server {
     }
 
     #[tool(
-        description = "One task with who holds it, the latest submission and the latest rejection reason."
+        description = "One task with who holds it, the latest submission and rejection reason, its blockers and subtasks, and what it is still waiting on."
     )]
     async fn task_get(&self, Parameters(a): Parameters<IdArgs>) -> CallToolResult {
         reply(self.store.task_detail(&a.id).await)
@@ -176,7 +186,7 @@ impl Server {
     }
 
     #[tool(
-        description = "Atomically claim the next task to work on (highest priority, then oldest). Returns the task as task_get does, or null when the queue is empty. Prefer this over picking from tasks_list."
+        description = "Atomically claim the next task to work on (highest priority, then oldest; tasks waiting on a blocker or a subtask are skipped). Returns the task as task_get does, or null when nothing is claimable. Prefer this over picking from tasks_list."
     )]
     async fn claim_next(&self, Parameters(a): Parameters<TtlArgs>) -> CallToolResult {
         let detail = async {
@@ -220,10 +230,39 @@ impl Server {
         )
     }
 
-    #[tool(description = "Create a task in the queue.")]
+    #[tool(description = "Create a task in the queue, optionally as a subtask.")]
     async fn task_create(&self, Parameters(a): Parameters<CreateArgs>) -> CallToolResult {
         let body = a.body_md.unwrap_or_default();
-        reply(self.store.create_task(&a.title, &body, self.me()).await)
+        reply(match a.parent {
+            Some(parent) => {
+                self.store
+                    .create_subtask(&parent, &a.title, &body, self.me())
+                    .await
+            }
+            None => self.store.create_task(&a.title, &body, self.me()).await,
+        })
+    }
+
+    #[tool(
+        description = "Make task `id` wait until task `by` is done. claim_next skips tasks that are waiting."
+    )]
+    async fn task_block(&self, Parameters(a): Parameters<DependencyArgs>) -> CallToolResult {
+        reply(
+            self.store
+                .add_dependency(&a.id, &a.by, self.me())
+                .await
+                .map(|()| "blocked"),
+        )
+    }
+
+    #[tool(description = "Withdraw a dependency added with task_block.")]
+    async fn task_unblock(&self, Parameters(a): Parameters<DependencyArgs>) -> CallToolResult {
+        reply(
+            self.store
+                .remove_dependency(&a.id, &a.by, self.me())
+                .await
+                .map(|()| "unblocked"),
+        )
     }
 
     #[tool(
@@ -285,10 +324,11 @@ impl ServerHandler for Server {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(format!(
-                "RsTask workspace. You act as {:?} actor \"{}\" ({}). \
-                 Work loop: claim_next -> task_renew while working -> task_complete. \
-                 Review loop: tasks_list status=review -> task_get -> task_approve or task_reject.",
-                self.actor.kind, self.actor.name, self.actor.id
+                "RsTask workspace. You act as {:?} actor \"{}\" ({}), roles: {}. \
+                 Planner: task_create (parent for subtasks), task_block, task_update. \
+                 Worker: claim_next -> task_renew while working -> task_complete. \
+                 Reviewer: tasks_list status=review -> task_get -> task_approve or task_reject.",
+                self.actor.kind, self.actor.name, self.actor.id, self.actor.roles
             ))
     }
 }

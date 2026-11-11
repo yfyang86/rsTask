@@ -21,14 +21,15 @@ use uuid::Uuid;
 use crate::error::{Error, Result};
 use crate::event::{EventId, Signable, StoredEvent};
 use crate::models::{
-    Actor, ActorKind, Claim, Event, Rejected, ReleaseReason, Submission, Submitted, Task,
-    TaskDetail, TaskStatus,
+    Actor, ActorKind, Claim, Event, Rejected, ReleaseReason, Role, Roles, Submission, Submitted,
+    Task, TaskDetail, TaskStatus,
 };
 use crate::sync::{ActorRow, Bucket, Merge, SyncBundle, BUCKET};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_dag.sql");
-const SCHEMA_VERSION: i64 = 2;
+const MIGRATION_0003: &str = include_str!("../migrations/0003_links_roles.sql");
+const SCHEMA_VERSION: i64 = 3;
 
 /// Ordered, versioned migrations guarded by `PRAGMA user_version`, so reopening
 /// an existing database is a no-op (ALTER migrations are not idempotent).
@@ -41,6 +42,9 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     }
     if version < 2 {
         sqlx::raw_sql(MIGRATION_0002).execute(pool).await?;
+    }
+    if version < 3 {
+        sqlx::raw_sql(MIGRATION_0003).execute(pool).await?;
     }
     if version != SCHEMA_VERSION {
         sqlx::raw_sql(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
@@ -116,17 +120,39 @@ impl Store {
 
     // ---------------------------------------------------------------- actors
 
+    /// An actor holding every role.
     pub async fn create_actor(&self, kind: ActorKind, name: &str) -> Result<Actor> {
+        self.create_actor_with_roles(kind, name, &Role::ALL).await
+    }
+
+    /// An actor limited to `roles` (PRD-v3 M5); none given means all.
+    pub async fn create_actor_with_roles(
+        &self,
+        kind: ActorKind,
+        name: &str,
+        roles: &[Role],
+    ) -> Result<Actor> {
+        let roles = Roles(if roles.is_empty() {
+            Role::ALL.to_vec()
+        } else {
+            Role::ALL
+                .into_iter()
+                .filter(|r| roles.contains(r))
+                .collect()
+        });
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
-        sqlx::query("INSERT INTO actors (id, kind, name, created_at) VALUES (?, ?, ?, ?)")
-            .bind(&id)
-            .bind(kind)
-            .bind(name)
-            .bind(now)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO actors (id, kind, name, created_at, roles) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(kind)
+        .bind(name)
+        .bind(now)
+        .bind(roles.to_string())
+        .execute(&self.pool)
+        .await?;
         // Interim plaintext keystore inside the workspace DB (PRD-v2 D5).
         sqlx::query("INSERT INTO actor_keys (actor_id, pubkey, secret) VALUES (?, ?, ?)")
             .bind(&id)
@@ -140,6 +166,18 @@ impl Store {
             name: name.to_string(),
             created_at: now,
             last_heartbeat_at: None,
+            roles,
+        })
+    }
+
+    /// `Ok` if the actor holds `role`; the error names the role it lacks.
+    async fn require_role(&self, actor_id: &str, role: Role, action: &str) -> Result<()> {
+        if self.get_actor(actor_id).await?.roles.0.contains(&role) {
+            return Ok(());
+        }
+        Err(Error::NotPermitted {
+            actor: actor_id.to_string(),
+            action: format!("{action} (needs role {role})"),
         })
     }
 
@@ -181,16 +219,44 @@ impl Store {
     // ----------------------------------------------------------------- tasks
 
     pub async fn create_task(&self, title: &str, body_md: &str, created_by: &str) -> Result<Task> {
-        // Fail fast on unknown actor (FK would too, but with a worse message).
-        self.get_actor(created_by).await?;
+        self.create_task_under(None, title, body_md, created_by)
+            .await
+    }
+
+    /// Create a subtask: the parent is not claimable until its subtasks are
+    /// done (PRD-v3 M4).
+    pub async fn create_subtask(
+        &self,
+        parent_id: &str,
+        title: &str,
+        body_md: &str,
+        created_by: &str,
+    ) -> Result<Task> {
+        self.create_task_under(Some(parent_id), title, body_md, created_by)
+            .await
+    }
+
+    async fn create_task_under(
+        &self,
+        parent_id: Option<&str>,
+        title: &str,
+        body_md: &str,
+        created_by: &str,
+    ) -> Result<Task> {
+        self.require_role(created_by, Role::Planner, "create tasks")
+            .await?;
         let signing_key = self.signing_key(created_by).await?;
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let mut tx = self.begin_write().await?;
+        if let Some(parent_id) = parent_id {
+            require_task_tx(&mut tx, parent_id).await?;
+        }
         sqlx::query(
-            "INSERT INTO tasks (id, title, body_md, status, created_by, created_at, updated_at)
-             VALUES (?, ?, ?, 'queue', ?, ?, ?)",
+            "INSERT INTO tasks
+                 (id, title, body_md, status, created_by, created_at, updated_at, parent_id)
+             VALUES (?, ?, ?, 'queue', ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(title)
@@ -198,22 +264,111 @@ impl Store {
         .bind(created_by)
         .bind(now)
         .bind(now)
+        .bind(parent_id)
         .execute(&mut *tx)
         .await?;
 
+        let mut payload = json!({ "title": title, "body_md": body_md });
+        if let Some(parent_id) = parent_id {
+            payload["parent"] = json!(parent_id);
+        }
         self.append_event_tx(
             &mut tx,
             &signing_key,
             created_by,
             &id,
             "task.created",
-            json!({ "title": title, "body_md": body_md }),
+            payload,
             now,
         )
         .await?;
 
         tx.commit().await?;
         self.get_task(&id).await
+    }
+
+    /// Declare that `task_id` waits until `blocked_by` is done (PRD-v3 M4).
+    pub async fn add_dependency(
+        &self,
+        task_id: &str,
+        blocked_by: &str,
+        actor_id: &str,
+    ) -> Result<()> {
+        self.require_role(actor_id, Role::Planner, "edit dependencies")
+            .await?;
+        let signing_key = self.signing_key(actor_id).await?;
+        let at = Utc::now();
+        let mut tx = self.begin_write().await?;
+        require_task_tx(&mut tx, task_id).await?;
+        require_task_tx(&mut tx, blocked_by).await?;
+        // Would `blocked_by` end up waiting — through blockers or subtasks —
+        // on `task_id` itself?
+        let cycle: bool = sqlx::query_scalar(
+            "WITH RECURSIVE waits(id) AS (
+                 SELECT ?1
+                 UNION SELECT d.blocked_by FROM task_deps d JOIN waits ON d.task_id = waits.id
+                 UNION SELECT c.id FROM tasks c JOIN waits ON c.parent_id = waits.id)
+             SELECT EXISTS(SELECT 1 FROM waits WHERE id = ?2)",
+        )
+        .bind(blocked_by)
+        .bind(task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if cycle {
+            return Err(Error::DependencyCycle {
+                task: task_id.to_string(),
+                by: blocked_by.to_string(),
+            });
+        }
+        sqlx::query("INSERT OR IGNORE INTO task_deps (task_id, blocked_by) VALUES (?, ?)")
+            .bind(task_id)
+            .bind(blocked_by)
+            .execute(&mut *tx)
+            .await?;
+        self.append_event_tx(
+            &mut tx,
+            &signing_key,
+            actor_id,
+            task_id,
+            "task.blocked",
+            json!({ "by": blocked_by }),
+            at,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Withdraw a dependency declared with `add_dependency`.
+    pub async fn remove_dependency(
+        &self,
+        task_id: &str,
+        blocked_by: &str,
+        actor_id: &str,
+    ) -> Result<()> {
+        self.require_role(actor_id, Role::Planner, "edit dependencies")
+            .await?;
+        let signing_key = self.signing_key(actor_id).await?;
+        let at = Utc::now();
+        let mut tx = self.begin_write().await?;
+        require_task_tx(&mut tx, task_id).await?;
+        sqlx::query("DELETE FROM task_deps WHERE task_id = ? AND blocked_by = ?")
+            .bind(task_id)
+            .bind(blocked_by)
+            .execute(&mut *tx)
+            .await?;
+        self.append_event_tx(
+            &mut tx,
+            &signing_key,
+            actor_id,
+            task_id,
+            "task.unblocked",
+            json!({ "by": blocked_by }),
+            at,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Return stale claims' tasks to the pool, so reads never show dead
@@ -259,11 +414,27 @@ impl Store {
                     at,
                     reason: p["reason"].as_str().unwrap_or("").to_string(),
                 });
+        let blocked_by: Vec<String> = sqlx::query_scalar(
+            "SELECT blocked_by FROM task_deps WHERE task_id = ? ORDER BY blocked_by",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
+        let children: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM tasks WHERE parent_id = ? ORDER BY created_at, id")
+                .bind(id)
+                .fetch_all(&self.pool)
+                .await?;
+        let mut conn = self.pool.acquire().await?;
+        let waiting_on = waiting_on(&mut conn, id).await?;
         Ok(TaskDetail {
             task,
             claim,
             submission,
             rejection,
+            blocked_by,
+            children,
+            waiting_on,
         })
     }
 
@@ -309,7 +480,7 @@ impl Store {
     }
 
     /// Update title/body/priority. While the task is claimed only the holder
-    /// may edit it; otherwise any actor may (planning).
+    /// may edit it; otherwise it takes a planner.
     pub async fn update_task(
         &self,
         id: &str,
@@ -319,27 +490,28 @@ impl Store {
         actor_id: &str,
     ) -> Result<Task> {
         let signing_key = self.signing_key(actor_id).await?;
+        let planner = self
+            .require_role(actor_id, Role::Planner, "edit an unclaimed task")
+            .await;
         let now = Utc::now();
         let mut tx = self.begin_write().await?;
         sweep_expired_tx(&mut tx, now).await?;
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?)")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-        if !exists {
-            return Err(Error::TaskNotFound(id.to_string()));
-        }
+        require_task_tx(&mut tx, id).await?;
         let holder: Option<String> = sqlx::query_scalar(
             "SELECT actor_id FROM claims WHERE task_id = ? AND released_at IS NULL",
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        if let Some(holder) = holder.filter(|h| h != actor_id) {
-            return Err(Error::ClaimConflict {
-                task: id.to_string(),
-                actor: holder,
-            });
+        match holder {
+            Some(holder) if holder != actor_id => {
+                return Err(Error::ClaimConflict {
+                    task: id.to_string(),
+                    actor: holder,
+                });
+            }
+            Some(_) => {}
+            None => planner?,
         }
         sqlx::query(
             "UPDATE tasks SET
@@ -391,6 +563,8 @@ impl Store {
     /// Returns `Error::ClaimConflict` if the task is already claimed, and
     /// `Error::InvalidTransition` if the task is not in `queue`.
     pub async fn claim_task(&self, task_id: &str, actor_id: &str, ttl: Duration) -> Result<Claim> {
+        self.require_role(actor_id, Role::Worker, "claim tasks")
+            .await?;
         let signing_key = self.signing_key(actor_id).await?;
         let now = Utc::now();
         let mut tx = self.begin_claim_tx(now).await?;
@@ -402,15 +576,22 @@ impl Store {
     }
 
     /// Atomically claim the next eligible task — highest priority, then
-    /// oldest — so agents never list-then-race (PRD-v3 M3). `None` when the
-    /// queue is empty.
+    /// oldest, skipping tasks still waiting on a blocker or a subtask — so
+    /// agents never list-then-race (PRD-v3 M3, M4). `None` when nothing is
+    /// claimable.
     pub async fn claim_next(&self, actor_id: &str, ttl: Duration) -> Result<Option<Claim>> {
+        self.require_role(actor_id, Role::Worker, "claim tasks")
+            .await?;
         let signing_key = self.signing_key(actor_id).await?;
         let now = Utc::now();
         let mut tx = self.begin_claim_tx(now).await?;
         let next: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM tasks WHERE status = 'queue'
-             ORDER BY priority DESC, created_at LIMIT 1",
+            "SELECT t.id FROM tasks t WHERE t.status = 'queue'
+               AND NOT EXISTS (SELECT 1 FROM task_deps d JOIN tasks b ON b.id = d.blocked_by
+                               WHERE d.task_id = t.id AND b.status != 'done')
+               AND NOT EXISTS (SELECT 1 FROM tasks c
+                               WHERE c.parent_id = t.id AND c.status != 'done')
+             ORDER BY t.priority DESC, t.created_at LIMIT 1",
         )
         .fetch_optional(&mut *tx)
         .await?;
@@ -488,6 +669,13 @@ impl Store {
         }
 
         self.require_actor_tx(tx, actor_id).await?;
+        let waiting = waiting_on(tx, task_id).await?;
+        if !waiting.is_empty() {
+            return Err(Error::Blocked {
+                task: task_id.to_string(),
+                by: waiting.join(", "),
+            });
+        }
 
         let claim = Claim {
             id: Uuid::new_v4().to_string(),
@@ -683,6 +871,8 @@ impl Store {
     /// Approve: review → done. No claim requirement — any actor can review —
     /// except that an agent cannot approve its own submission (PRD-v3 G2).
     pub async fn approve(&self, task_id: &str, actor_id: &str) -> Result<Task> {
+        self.require_role(actor_id, Role::Reviewer, "review tasks")
+            .await?;
         let signing_key = self.signing_key(actor_id).await?;
         let mut tx = self.begin_write().await?;
         let submitter: Option<String> = sqlx::query_scalar(
@@ -726,6 +916,8 @@ impl Store {
         actor_id: &str,
         reason: &str,
     ) -> Result<Task> {
+        self.require_role(actor_id, Role::Reviewer, "review tasks")
+            .await?;
         let signing_key = self.signing_key(actor_id).await?;
         let mut tx = self.begin_write().await?;
         self.transition_tx(
@@ -987,21 +1179,22 @@ impl Store {
             )
             .collect();
 
-        type ActorRowCols = (String, ActorKind, String, DateTime<Utc>, Vec<u8>);
+        type ActorRowCols = (String, ActorKind, String, DateTime<Utc>, Vec<u8>, String);
         let arows: Vec<ActorRowCols> = sqlx::query_as(
-            "SELECT a.id, a.kind, a.name, a.created_at, k.pubkey
+            "SELECT a.id, a.kind, a.name, a.created_at, k.pubkey, a.roles
                  FROM actors a JOIN actor_keys k ON k.actor_id = a.id",
         )
         .fetch_all(&self.pool)
         .await?;
         let actors = arows
             .into_iter()
-            .map(|(id, kind, name, created_at, pubkey)| ActorRow {
+            .map(|(id, kind, name, created_at, pubkey, roles)| ActorRow {
                 id,
                 kind,
                 name,
                 created_at,
                 pubkey: to_id(&pubkey),
+                roles: roles.into(),
             })
             .collect();
 
@@ -1016,12 +1209,14 @@ impl Store {
         let mut tx = self.begin_write().await?;
         for row in &bundle.actors {
             sqlx::query(
-                "INSERT OR IGNORE INTO actors (id, kind, name, created_at) VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO actors (id, kind, name, created_at, roles)
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(&row.id)
             .bind(row.kind)
             .bind(&row.name)
             .bind(row.created_at)
+            .bind(row.roles.to_string())
             .execute(&mut *tx)
             .await?;
             sqlx::query("INSERT OR IGNORE INTO actor_keys (actor_id, pubkey) VALUES (?, ?)")
@@ -1099,6 +1294,75 @@ async fn sweep_expired_tx(
     .bind(at)
     .execute(&mut **tx)
     .await?;
+    Ok(())
+}
+
+async fn require_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, id: &str) -> Result<()> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?)")
+        .bind(id)
+        .fetch_one(&mut **tx)
+        .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(Error::TaskNotFound(id.to_string()))
+    }
+}
+
+/// What the task still waits for: declared blockers and subtasks that are
+/// not `done` (PRD-v3 M4). Empty means claimable.
+async fn waiting_on(conn: &mut SqliteConnection, task_id: &str) -> Result<Vec<String>> {
+    let mut ids: Vec<String> = sqlx::query_scalar(
+        "SELECT b.id FROM task_deps d JOIN tasks b ON b.id = d.blocked_by
+         WHERE d.task_id = ? AND b.status != 'done' ORDER BY b.id",
+    )
+    .bind(task_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let children: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM tasks WHERE parent_id = ? AND status != 'done' ORDER BY created_at, id",
+    )
+    .bind(task_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    ids.extend(children);
+    Ok(ids)
+}
+
+/// Rebuild a task's dependency set from its `task.blocked` / `task.unblocked`
+/// events in `(lamport, event_id)` order, so concurrent edits converge.
+async fn refold_deps_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &str) -> Result<()> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT kind, payload FROM events
+         WHERE task_id = ? AND event_id IS NOT NULL
+           AND kind IN ('task.blocked', 'task.unblocked')
+         ORDER BY lamport, event_id",
+    )
+    .bind(task_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut deps: Vec<String> = Vec::new();
+    for (kind, payload) in rows {
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or(json!({}));
+        let Some(by) = payload["by"].as_str() else {
+            continue;
+        };
+        deps.retain(|d| d != by);
+        if kind == "task.blocked" {
+            deps.push(by.to_string());
+        }
+    }
+    sqlx::query("DELETE FROM task_deps WHERE task_id = ?")
+        .bind(task_id)
+        .execute(&mut **tx)
+        .await?;
+    for by in deps {
+        sqlx::query("INSERT INTO task_deps (task_id, blocked_by) VALUES (?, ?)")
+            .bind(task_id)
+            .bind(by)
+            .execute(&mut **tx)
+            .await?;
+    }
     Ok(())
 }
 
@@ -1351,8 +1615,8 @@ async fn apply_effect_tx(
         "task.created" => {
             sqlx::query(
                 "INSERT OR IGNORE INTO tasks
-                     (id, title, body_md, status, created_by, created_at, updated_at)
-                 VALUES (?, ?, ?, 'queue', ?, ?, ?)",
+                     (id, title, body_md, status, created_by, created_at, updated_at, parent_id)
+                 VALUES (?, ?, ?, 'queue', ?, ?, ?, ?)",
             )
             .bind(&ev.body.task_id)
             .bind(payload["title"].as_str().unwrap_or(""))
@@ -1360,6 +1624,7 @@ async fn apply_effect_tx(
             .bind(&ev.body.actor_id)
             .bind(ev.body.at)
             .bind(ev.body.at)
+            .bind(payload["parent"].as_str())
             .execute(&mut **tx)
             .await?;
         }
@@ -1381,6 +1646,9 @@ async fn apply_effect_tx(
             .bind(&ev.body.task_id)
             .execute(&mut **tx)
             .await?;
+        }
+        "task.blocked" | "task.unblocked" => {
+            refold_deps_tx(tx, &ev.body.task_id).await?;
         }
         // Claims and status fold per task below (D8, PRD-v3 G1).
         "task.claimed"

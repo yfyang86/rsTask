@@ -1,0 +1,6 @@
+# U2 — a parent waits for its subtasks
+task show epic -> {"status":"queue","children":["part-1","part-2"],"waiting_on":["part-1","part-2"]}
+claim_next -> part 1
+claim_next -> part 2
+task show epic -> {"status":"queue","children":["part-1","part-2"],"waiting_on":[]}
+claim_next -> epic

@@ -1,0 +1,12 @@
+# U4 — roles route the work
+RsTask workspace. You act as Agent actor "worker" (worker), roles: worker
+planner task_create  -> created u4 job
+worker task_create  -> refused: needs role planner
+reviewer task_create  -> refused: needs role planner
+planner claim_next   -> refused: needs role worker
+worker claim_next   -> claimed u4 job
+reviewer claim_next   -> refused: needs role worker
+planner task_approve -> refused: needs role reviewer
+worker task_approve -> refused: needs role reviewer
+reviewer task_approve -> approved, status done
+actor created without --role: ["planner","worker","reviewer"]

@@ -144,6 +144,7 @@ async fn agents_work_and_review_over_mcp() {
             "board_state",
             "claim_next",
             "task_approve",
+            "task_block",
             "task_claim",
             "task_complete",
             "task_create",
@@ -151,6 +152,7 @@ async fn agents_work_and_review_over_mcp() {
             "task_reject",
             "task_release",
             "task_renew",
+            "task_unblock",
             "task_update",
             "tasks_list"
         ]

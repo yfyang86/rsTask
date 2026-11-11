@@ -24,6 +24,12 @@ pub enum Error {
     #[error("actor {actor} is not permitted to {action}")]
     NotPermitted { actor: String, action: String },
 
+    #[error("task {task} is blocked until these are done: {by}")]
+    Blocked { task: String, by: String },
+
+    #[error("task {task} cannot wait on {by}: that would be a cycle")]
+    DependencyCycle { task: String, by: String },
+
     #[error("claim expired for task {0}")]
     ClaimExpired(String),
 

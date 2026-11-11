@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::event::EventId;
-use crate::models::ActorKind;
+use crate::models::{ActorKind, Roles};
 
 /// Lamport events per fingerprint bucket (sync step 1).
 pub const BUCKET: u64 = 256;
@@ -41,6 +41,7 @@ pub struct ActorRow {
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub pubkey: [u8; 32],
+    pub roles: Roles,
 }
 
 /// Full-state sync unit: `rstask sync export|import` today, the payload of the
@@ -121,6 +122,7 @@ mod tests {
                 name: "alice".into(),
                 created_at: Utc::now(),
                 pubkey: [7; 32],
+                roles: Roles(vec![]),
             }],
         };
         let decoded = decode_bundle(&encode_bundle(&bundle)).unwrap();
