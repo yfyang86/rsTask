@@ -1,0 +1,55 @@
+# S5 — full convergence: exchange both ways, then re-exchange (must move nothing)
+$ rstask sync export   (on a) > a4.bundle; rstask sync import < a4.bundle   (on b)
+$ rstask sync import
+{
+  "added": 0,
+  "pending": 0,
+  "duplicates": 3,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+
+$ rstask sync export   (on b) > b4.bundle; rstask sync import < b4.bundle   (on a)
+$ rstask sync import
+{
+  "added": 2,
+  "pending": 0,
+  "duplicates": 3,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+
+# sync status must be identical on both replicas
+$ rstask sync status
+{
+  "events": 5,
+  "heads": [
+    "ba4fc3115f4085c0067a9ec7201b370e23043e20a9eeecc3b38635c7772aa65a"
+  ],
+  "pending": 0
+}
+(exit 0)
+
+$ rstask sync status
+{
+  "events": 5,
+  "heads": [
+    "ba4fc3115f4085c0067a9ec7201b370e23043e20a9eeecc3b38635c7772aa65a"
+  ],
+  "pending": 0
+}
+(exit 0)
+
+# re-exchange moves nothing
+$ rstask sync import
+{
+  "added": 0,
+  "pending": 0,
+  "duplicates": 5,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+

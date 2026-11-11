@@ -1,0 +1,83 @@
+# S1 — planning: init replica a (alice's machine)
+$ rstask init
+initialized /tmp/rstask-walkthrough/a.sqlite
+(exit 0)
+
+# register both actors on a; directory syncs to b later
+$ rstask actor new alice --kind human   (on a)
+{
+  "id": "7f2974ce-4fd9-4af4-8cbd-866f103ec22a",
+  "kind": "human",
+  "name": "alice",
+  "created_at": "2026-11-11T07:39:10.731926Z",
+  "last_heartbeat_at": null
+}
+
+$ rstask actor new bob --kind agent   (on a)
+{
+  "id": "cf6e9abe-aa10-422e-9e4e-58bbb21d089e",
+  "kind": "agent",
+  "name": "bob",
+  "created_at": "2026-11-11T07:39:10.754953Z",
+  "last_heartbeat_at": null
+}
+
+# file WT-1 with the Markdown spec as the task body
+$ rstask task new "WT-1: ..." --body @wt1-body.md --actor alice   (on a)
+{
+  "id": "a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0",
+  "title": "WT-1: hex-render event ids in task log",
+  "body_md": "## WT-1 — hex-render event ids in `rstask task log`\n\nSprint-01 debt: `task log` prints `event_id`/`signature`/`pubkey` as raw byte\narrays. Render them as hex; keep everything else unchanged.\n\n### Acceptance criteria\n- AC1: hex strings, not byte arrays (absent on pre-DAG rows).\n- AC2: output stays valid JSON; other fields unchanged.\n- AC3: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` green.",
+  "status": "queue",
+  "priority": 0,
+  "created_by": "7f2974ce-4fd9-4af4-8cbd-866f103ec22a",
+  "created_at": "2026-11-11T07:39:10.788558Z",
+  "updated_at": "2026-11-11T07:39:10.788558Z"
+}
+
+# the creation is already a signed DAG event (pre-fix rendering)
+$ rstask task show a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0
+{
+  "id": "a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0",
+  "title": "WT-1: hex-render event ids in task log",
+  "body_md": "## WT-1 — hex-render event ids in `rstask task log`\n\nSprint-01 debt: `task log` prints `event_id`/`signature`/`pubkey` as raw byte\narrays. Render them as hex; keep everything else unchanged.\n\n### Acceptance criteria\n- AC1: hex strings, not byte arrays (absent on pre-DAG rows).\n- AC2: output stays valid JSON; other fields unchanged.\n- AC3: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` green.",
+  "status": "queue",
+  "priority": 0,
+  "created_by": "7f2974ce-4fd9-4af4-8cbd-866f103ec22a",
+  "created_at": "2026-11-11T07:39:10.788558Z",
+  "updated_at": "2026-11-11T07:39:10.788558Z"
+}
+(exit 0)
+
+$ rstask task log a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0
+[
+  {
+    "actor_id": "7f2974ce-4fd9-4af4-8cbd-866f103ec22a",
+    "at": "2026-11-11T07:39:10.788558Z",
+    "event_id": "805c31623f04ee30d3ffc21808e2789745aae723a3047313d9ebe686eb8ef1db",
+    "kind": "task.created",
+    "lamport": 0,
+    "parents": "[]",
+    "payload": "{\"body_md\":\"## WT-1 — hex-render event ids in `rstask task log`\\n\\nSprint-01 debt: `task log` prints `event_id`/`signature`/`pubkey` as raw byte\\narrays. Render them as hex; keep everything else unchanged.\\n\\n### Acceptance criteria\\n- AC1: hex strings, not byte arrays (absent on pre-DAG rows).\\n- AC2: output stays valid JSON; other fields unchanged.\\n- AC3: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` green.\",\"title\":\"WT-1: hex-render event ids in task log\"}",
+    "pubkey": "81b351d6fc57b34eb62e0ff4ee43941ef9a889d0f5639202fc89d8313e3e46e0",
+    "seq": 1,
+    "signature": "bf877cb030be0b98b09e135ebbf30047d60713e1f7413c1891ae754c76781677e1f5d9a2dff2dad43c98a19b881c5eeb0945f8f15a1b9ebf52c13712f3b24b0d",
+    "task_id": "a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0"
+  }
+]
+(exit 0)
+
+# first exchange: directory + task reach replica b (bob's host)
+$ rstask sync export   (on a) > a1.bundle
+$ rstask init   (on b)
+initialized /tmp/rstask-walkthrough/b.sqlite
+$ rstask sync import
+{
+  "added": 1,
+  "pending": 0,
+  "duplicates": 0,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+

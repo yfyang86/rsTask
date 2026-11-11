@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use rstask_core::{ActorKind, Config, Store, Task, TaskStatus};
+use rstask_core::{ActorKind, Config, Event, Store, Task, TaskStatus};
 
 #[derive(Parser)]
 #[command(name = "rstask", about = "Local-first, Markdown-native task workspace")]
@@ -222,7 +222,8 @@ async fn main() -> anyhow::Result<()> {
             }
             TaskCommand::Log { id } => {
                 let events = store.list_events(&id).await?;
-                println!("{}", serde_json::to_string_pretty(&events)?);
+                let rendered: Vec<serde_json::Value> = events.iter().map(pretty_event).collect();
+                println!("{}", serde_json::to_string_pretty(&rendered)?);
             }
         },
         Command::Board => {
@@ -257,6 +258,23 @@ async fn main() -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+/// Byte-array DAG fields render as hex for humans (WT-1); `null`s on pre-DAG
+/// rows are left untouched.
+fn pretty_event(ev: &Event) -> serde_json::Value {
+    let mut v = serde_json::to_value(ev).unwrap_or_default();
+    for key in ["event_id", "signature", "pubkey"] {
+        let bytes = v.get(key).and_then(|b| b.as_array()).and_then(|arr| {
+            arr.iter()
+                .map(|n| n.as_u64().map(|x| x as u8))
+                .collect::<Option<Vec<u8>>>()
+        });
+        if let Some(bytes) = bytes.filter(|b| !b.is_empty()) {
+            v[key] = serde_json::json!(hex::encode(bytes));
+        }
+    }
+    v
 }
 
 fn print_task_table(tasks: &[Task]) {

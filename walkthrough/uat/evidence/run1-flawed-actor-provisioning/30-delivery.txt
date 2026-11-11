@@ -1,0 +1,260 @@
+# S3 — delivery: the WT-1 code change in this repo
+$ git diff --stat
+ Cargo.lock                             | 189 ++++++-
+ Cargo.toml                             |   5 +
+ README.md                              |  15 +
+ crates/rstask-cli/Cargo.toml           |   1 +
+ crates/rstask-cli/src/main.rs          |  94 +++-
+ crates/rstask-core/Cargo.toml          |   5 +
+ crates/rstask-core/src/config.rs       |  11 +-
+ crates/rstask-core/src/error.rs        |   9 +
+ crates/rstask-core/src/lib.rs          |   4 +
+ crates/rstask-core/src/models.rs       |  11 +-
+ crates/rstask-core/src/store.rs        | 914 +++++++++++++++++++++++++++++----
+ crates/rstask-core/tests/store_test.rs |  50 +-
+ crates/rstask-server/src/main.rs       |   3 +-
+ 13 files changed, 1173 insertions(+), 138 deletions(-)
+
+$ git diff -- crates/rstask-cli/src/main.rs
+diff --git a/crates/rstask-cli/src/main.rs b/crates/rstask-cli/src/main.rs
+index df2b0d2..3f9531a 100644
+--- a/crates/rstask-cli/src/main.rs
++++ b/crates/rstask-cli/src/main.rs
+@@ -4,7 +4,7 @@ use std::path::PathBuf;
+ use std::time::Duration;
+ 
+ use clap::{Parser, Subcommand};
+-use rstask_core::{ActorKind, Config, Store, Task, TaskStatus};
++use rstask_core::{ActorKind, Config, Event, Store, Task, TaskStatus};
+ 
+ #[derive(Parser)]
+ #[command(name = "rstask", about = "Local-first, Markdown-native task workspace")]
+@@ -40,6 +40,22 @@ enum Command {
+ 
+     /// Kanban-style aggregate: tasks grouped by status.
+     Board,
++
++    /// Sync the signed event DAG with another replica (file bundles; wire in sprint 02).
++    Sync {
++        #[command(subcommand)]
++        command: SyncCommand,
++    },
++}
++
++#[derive(Subcommand)]
++enum SyncCommand {
++    /// Export the signed event DAG + actor directory as a binary bundle (stdout).
++    Export,
++    /// Import a bundle from stdin; prints merge stats as JSON.
++    Import,
++    /// Show sync state: heads, DAG event count, pending count.
++    Status,
+ }
+ 
+ #[derive(Subcommand)]
+@@ -49,7 +65,9 @@ enum ActorCommand {
+         #[arg(long, value_enum, default_value = "human")]
+         kind: KindArg,
+     },
+-    Heartbeat { id: String },
++    Heartbeat {
++        id: String,
++    },
+ }
+ 
+ #[derive(clap::ValueEnum, Clone)]
+@@ -72,7 +90,9 @@ enum TaskCommand {
+         #[arg(long, value_enum)]
+         status: Option<StatusArg>,
+     },
+-    Show { id: String },
++    Show {
++        id: String,
++    },
+     /// Claim = atomic lock with TTL. Default TTL 15 min.
+     Claim {
+         id: String,
+@@ -90,13 +110,27 @@ enum TaskCommand {
+         force: bool,
+     },
+     /// Work → review. Releases the claim.
+-    Submit { id: String, #[arg(long)] actor: String },
++    Submit {
++        id: String,
++        #[arg(long)]
++        actor: String,
++    },
+     /// Review → done (reviewer approval; agents can't self-approve).
+-    Approve { id: String, #[arg(long)] actor: String },
++    Approve {
++        id: String,
++        #[arg(long)]
++        actor: String,
++    },
+     /// Review → queue (send back for rework).
+-    Reject { id: String, #[arg(long)] actor: String },
++    Reject {
++        id: String,
++        #[arg(long)]
++        actor: String,
++    },
+     /// Show the immutable event log of a task.
+-    Log { id: String },
++    Log {
++        id: String,
++    },
+ }
+ 
+ #[derive(clap::ValueEnum, Clone)]
+@@ -122,8 +156,7 @@ impl From<StatusArg> for TaskStatus {
+ async fn main() -> anyhow::Result<()> {
+     tracing_subscriber::fmt()
+         .with_env_filter(
+-            tracing_subscriber::EnvFilter::try_from_default_env()
+-                .unwrap_or_else(|_| "warn".into()),
++            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+         )
+         .init();
+ 
+@@ -189,7 +222,8 @@ async fn main() -> anyhow::Result<()> {
+             }
+             TaskCommand::Log { id } => {
+                 let events = store.list_events(&id).await?;
+-                println!("{}", serde_json::to_string_pretty(&events)?);
++                let rendered: Vec<serde_json::Value> = events.iter().map(pretty_event).collect();
++                println!("{}", serde_json::to_string_pretty(&rendered)?);
+             }
+         },
+         Command::Board => {
+@@ -199,10 +233,50 @@ async fn main() -> anyhow::Result<()> {
+                 print_task_table(&tasks);
+             }
+         }
++        Command::Sync { command } => match command {
++            SyncCommand::Export => {
++                let bundle = store.export_bundle().await?;
++                let bytes = rstask_core::sync::encode_bundle(&bundle);
++                std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
++            }
++            SyncCommand::Import => {
++                let mut buf = Vec::new();
++                std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
++                let bundle = rstask_core::sync::decode_bundle(&buf)?;
++                let merge = store.receive_bundle(&bundle).await?;
++                println!("{}", serde_json::to_string_pretty(&merge)?);
++            }
++            SyncCommand::Status => {
++                let heads = store.heads().await?;
++                let status = serde_json::json!({
++                    "heads": heads.iter().map(hex::encode).collect::<Vec<_>>(),
++                    "events": store.dag_event_count().await?,
++                    "pending": store.pending_count().await?,
++                });
++                println!("{}", serde_json::to_string_pretty(&status)?);
++            }
++        },
+     }
+     Ok(())
+ }
+ 
++/// Byte-array DAG fields render as hex for humans (WT-1); `null`s on pre-DAG
++/// rows are left untouched.
++fn pretty_event(ev: &Event) -> serde_json::Value {
++    let mut v = serde_json::to_value(ev).unwrap_or_default();
++    for key in ["event_id", "signature", "pubkey"] {
++        let bytes = v.get(key).and_then(|b| b.as_array()).and_then(|arr| {
++            arr.iter()
++                .map(|n| n.as_u64().map(|x| x as u8))
++                .collect::<Option<Vec<u8>>>()
++        });
++        if let Some(bytes) = bytes.filter(|b| !b.is_empty()) {
++            v[key] = serde_json::json!(hex::encode(bytes));
++        }
++    }
++    v
++}
++
+ fn print_task_table(tasks: &[Task]) {
+     if tasks.is_empty() {
+         println!("(no tasks)");
+
+# AC3 gate
+$ cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
+Failed to find targets
+This utility formats all bin and lib files of the current crate using rustfmt.
+
+Usage: cargo fmt [OPTIONS] [-- <rustfmt_options>...]
+
+Arguments:
+  [rustfmt_options]...  Options passed to rustfmt
+
+Options:
+  -q, --quiet
+          No output printed to stdout
+  -v, --verbose
+          Use verbose output
+      --version
+          Print rustfmt version and exit
+  -p, --package <package>...
+          Specify package to format
+      --manifest-path <manifest-path>
+          Specify path to Cargo.toml
+      --message-format <message-format>
+          Specify message-format: short|json|human
+      --all
+          Format all packages, and also their local path-based dependencies
+      --check
+          Run rustfmt in check mode
+  -h, --help
+          Print help
+
+(gate exit 1)
+
+# AC1/AC2: post-fix rendering of the signed creation event
+$ rstask task log a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0
+[
+  {
+    "actor_id": "7f2974ce-4fd9-4af4-8cbd-866f103ec22a",
+    "at": "2026-11-11T07:39:10.788558Z",
+    "event_id": "805c31623f04ee30d3ffc21808e2789745aae723a3047313d9ebe686eb8ef1db",
+    "kind": "task.created",
+    "lamport": 0,
+    "parents": "[]",
+    "payload": "{\"body_md\":\"## WT-1 — hex-render event ids in `rstask task log`\\n\\nSprint-01 debt: `task log` prints `event_id`/`signature`/`pubkey` as raw byte\\narrays. Render them as hex; keep everything else unchanged.\\n\\n### Acceptance criteria\\n- AC1: hex strings, not byte arrays (absent on pre-DAG rows).\\n- AC2: output stays valid JSON; other fields unchanged.\\n- AC3: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` green.\",\"title\":\"WT-1: hex-render event ids in task log\"}",
+    "pubkey": "81b351d6fc57b34eb62e0ff4ee43941ef9a889d0f5639202fc89d8313e3e46e0",
+    "seq": 1,
+    "signature": "bf877cb030be0b98b09e135ebbf30047d60713e1f7413c1891ae754c76781677e1f5d9a2dff2dad43c98a19b881c5eeb0945f8f15a1b9ebf52c13712f3b24b0d",
+    "task_id": "a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0"
+  },
+  {
+    "actor_id": "7f2974ce-4fd9-4af4-8cbd-866f103ec22a",
+    "at": "2026-11-11T07:39:10.900015Z",
+    "event_id": "ab4670a66f1f0521e9feb109ebd4c49234afd4adaf6a0eb0161c1e17eddb8981",
+    "kind": "task.claimed",
+    "lamport": 1,
+    "parents": "[\"805c31623f04ee30d3ffc21808e2789745aae723a3047313d9ebe686eb8ef1db\"]",
+    "payload": "{\"claim_id\":\"774b1a48-ad6f-4c3e-a7a2-7b694ad0a668\",\"expires_at\":\"2026-11-11T07:54:10.900015Z\"}",
+    "pubkey": "81b351d6fc57b34eb62e0ff4ee43941ef9a889d0f5639202fc89d8313e3e46e0",
+    "seq": 2,
+    "signature": "bfd6a11423ee7f510e73d5e17d322324d4d72adb7a4e44053f13fa6ad2d25092c969dd47ff00a9bc64b3ea0825702728f970e26a284070876b29c6cde72e200b",
+    "task_id": "a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0"
+  }
+]
+(exit 0)
+
+# bob submits WT-1 for review on replica b
+$ rstask task submit a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0 --actor cf6e9abe-aa10-422e-9e4e-58bbb21d089e
+Error: actor cf6e9abe-aa10-422e-9e4e-58bbb21d089e has no signing key (pre-sync actor or learned from a peer)
+(exit 1, expected for negative probes)
+
+$ rstask sync export   (on b) > b3.bundle; rstask sync import < b3.bundle   (on a)
+$ rstask sync import
+{
+  "added": 0,
+  "pending": 0,
+  "duplicates": 4,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+

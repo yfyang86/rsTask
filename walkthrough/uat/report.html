@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RsTask walkthrough UAT — sprint proof</title>
+<!--
+  Offline, self-contained report of walkthrough/uat (run 3, 2026-11-11).
+  No external resources; evidence links are relative to this file.
+  Re-run: ./run.sh all  ·  scenarios: ./UAT.md  ·  analysis: ./SUMMARY.md
+-->
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --panel2: #1f232c; --line: #2c313c;
+    --text: #e6e8ee; --muted: #9aa3b2; --alice: #4da3ff; --bob: #c792ea;
+    --pass: #3fb96b; --warn: #e0a83c; --fail: #e05555; --accent: #6ee7c7;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.55 -apple-system, "SF Pro Text", "Helvetica Neue", Arial, sans-serif; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 32px 24px 80px; }
+  code, pre, .mono { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+        padding: 12px 14px; overflow-x: auto; margin: 10px 0 0; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 0 0 12px; color: var(--accent); letter-spacing: .2px; }
+  .sub { color: var(--muted); margin: 0 0 22px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+           padding: 18px 20px; margin: 18px 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+
+  .verdict { display: flex; align-items: center; gap: 14px; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
+           font-size: 12px; font-weight: 700; letter-spacing: .4px; }
+  .b-pass { background: rgba(63,185,107,.15); color: var(--pass); border: 1px solid var(--pass); }
+  .b-warn { background: rgba(224,168,60,.13); color: var(--warn); border: 1px solid var(--warn); }
+  .b-rec  { background: rgba(201,146,234,.13); color: var(--bob); border: 1px solid var(--bob); }
+  .big { font-size: 20px; padding: 5px 16px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line);
+           vertical-align: top; font-size: 14px; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase;
+       letter-spacing: .5px; }
+  tr:last-child td { border-bottom: 0; }
+  a { color: var(--alice); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* event chain */
+  .chain { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+  .ev { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+        padding: 7px 10px; min-width: 128px; }
+  .ev .k { font-weight: 700; font-size: 13px; }
+  .ev .m { font-size: 11.5px; color: var(--muted); }
+  .ev.alice { border-color: var(--alice); } .ev.bob { border-color: var(--bob); }
+  .ev.alice .who { color: var(--alice); } .ev.bob .who { color: var(--bob); }
+  .arrow { color: var(--muted); }
+  .lane { border-left: 3px solid var(--line); padding-left: 14px; margin: 14px 0 14px 4px; }
+  .lane h3 { margin: 0 0 2px; font-size: 14.5px; }
+  .done-chip { border: 1px solid var(--pass); color: var(--pass); border-radius: 8px;
+               padding: 7px 10px; font-weight: 700; font-size: 13px; }
+
+  .kpi { display: flex; gap: 26px; flex-wrap: wrap; }
+  .kpi div { text-align: left; }
+  .kpi .n { font-size: 26px; font-weight: 700; }
+  .kpi .l { color: var(--muted); font-size: 12px; }
+  .muted { color: var(--muted); } .small { font-size: 12.5px; }
+  .foot { margin-top: 30px; color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--line);
+          padding-top: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>RsTask walkthrough UAT</h1>
+  <p class="sub">A real software sprint run <em>through rsTask itself</em> — planning → exclusive claim → TTL recovery → delivery → review gate → approval → two-replica sync. Run 3 · 2026-11-11 · binary <code>target/debug/rstask</code> · replicas <code>/tmp/rstask-walkthrough/{a,b}.sqlite</code></p>
+
+  <div class="panel verdict">
+    <span class="badge b-pass big">PASS</span>
+    <div>
+      <strong>9/10 scenarios pass;</strong> one probe <span class="badge b-rec">recorded</span> a real product gap (F2).
+      Quality gate green: <code>fmt --check</code> · <code>clippy -D warnings</code> · <code>cargo test --workspace</code> (22/22).
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>The sprint — WT-1 (real code change, from sprint-01 debt)</h2>
+    <div class="grid2">
+      <div>
+        <p class="small muted">Task <code>a7205ee1</code> · filed by <b style="color:var(--alice)">alice</b> (human) with a Markdown body · implemented by <b style="color:var(--bob)">bob</b> (agent)</p>
+        <table>
+          <tr><th>AC</th><th>Criterion</th><th>Result</th></tr>
+          <tr><td>AC1</td><td><code>task log</code> renders <code>event_id</code>/<code>signature</code>/<code>pubkey</code> as hex</td><td><span class="badge b-pass">PASS</span></td></tr>
+          <tr><td>AC2</td><td>output stays valid JSON, other fields unchanged</td><td><span class="badge b-pass">PASS</span></td></tr>
+          <tr><td>AC3</td><td>workspace gate green</td><td><span class="badge b-pass">PASS</span> exit 0</td></tr>
+        </table>
+      </div>
+      <div>
+        <p class="small muted">Delivered change (verbatim from <a href="evidence/30-delivery.txt">evidence/30-delivery.txt</a>):</p>
+<pre>+fn pretty_event(ev: &Event) -> serde_json::Value {
++    let mut v = serde_json::to_value(ev).unwrap_or_default();
++    for key in ["event_id", "signature", "pubkey"] { … }
++    v
++}</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Sprint timeline — the signed event DAG (Lamport clock)</h2>
+    <p class="small muted">Chips are events; border color = signer. Every event is Ed25519-signed, BLAKE3 content-addressed, appended in the same transaction as the state change.</p>
+
+    <div class="lane">
+      <h3>WT-1 · <code>a7205ee1</code> — the sprint task <span class="muted">(happy path)</span></h3>
+      <div class="chain">
+        <div class="ev alice"><div class="k">created</div><div class="m">L0 · <span class="who">alice</span></div></div>
+        <span class="arrow">→</span>
+        <div class="ev bob"><div class="k">claimed</div><div class="m">L1 · <span class="who">bob</span> · TTL 15m</div></div>
+        <span class="arrow">→</span>
+        <div class="ev bob"><div class="k">submitted</div><div class="m">L5 · <span class="who">bob</span> · work→review</div></div>
+        <span class="arrow">→</span>
+        <div class="ev alice"><div class="k">approved</div><div class="m">L6 · <span class="who">alice</span> · review→done</div></div>
+        <span class="arrow">→</span>
+        <span class="done-chip">done</span>
+      </div>
+    </div>
+
+    <div class="lane">
+      <h3>WT-2 · <code>c4361039</code> — TTL probe <span class="muted">(crash recovery + self-approval probe)</span></h3>
+      <div class="chain">
+        <div class="ev alice"><div class="k">created</div><div class="m">L2 · <span class="who">alice</span></div></div>
+        <span class="arrow">→</span>
+        <div class="ev alice"><div class="k">claimed</div><div class="m">L3 · <span class="who">alice</span> · 07:57:52 → expires 07:57:53 (1s)</div></div>
+        <span class="arrow">⇝</span>
+        <div class="ev" title="swept"><div class="k">⏱ stale claim swept</div><div class="m">task back to pool</div></div>
+        <span class="arrow">→</span>
+        <div class="ev bob"><div class="k">claimed</div><div class="m">L4 · <span class="who">bob</span> · 07:57:54 (2s later)</div></div>
+        <span class="arrow">→</span>
+        <div class="ev bob"><div class="k">submitted</div><div class="m">L6 · <span class="who">bob</span></div></div>
+        <span class="arrow">→</span>
+        <div class="ev bob"><div class="k">approved</div><div class="m">L7 · <span class="who">bob</span> · <b>self-approved → see F2</b></div></div>
+        <span class="arrow">→</span>
+        <span class="done-chip">done</span>
+      </div>
+    </div>
+    <p class="small muted">The two lanes diverged before the final exchange — two DAG tips survived as heads. All replicas folded them to the same state anyway.</p>
+  </div>
+
+  <div class="panel">
+    <h2>Multi-replica sync converges the sprint</h2>
+    <div class="kpi">
+      <div><div class="n">9</div><div class="l">DAG events, both replicas</div></div>
+      <div><div class="n">2 = 2</div><div class="l">heads identical (a = b)</div></div>
+      <div><div class="n">0</div><div class="l">pending (parked) events</div></div>
+      <div><div class="n">0 added</div><div class="l">re-exchange moves nothing</div></div>
+    </div>
+    <pre>$ rstask sync status            # identical on a and b
+{ "events": 9, "pending": 0, "heads": [
+  "6acc54c9e1f09cd0898d1408c9c2a1354b32c1c0f8212abddc6c53794ac2a447",
+  "cd8a92f40c7f5b0173bad8c556c2beb15004907c8a0647eb679f46bb39656008" ] }</pre>
+    <p class="small muted">Transport here is sprint-01 file bundles (<code>sync export|import</code>); iroh QUIC wire transport is <a href="../../Sprints/sprint-02/PLAN.md">sprint 02</a>.</p>
+  </div>
+
+  <div class="panel">
+    <h2>Scenario results</h2>
+    <table>
+      <tr><th>#</th><th>Scenario</th><th>Proof</th><th>Result</th></tr>
+      <tr><td>S1</td><td>Planning — Markdown body intact, signed creation event</td><td><a href="evidence/10-plan.txt">10-plan.txt</a></td><td><span class="badge b-pass">PASS</span></td></tr>
+      <tr><td>S2</td><td>Exclusive claim — alice's attempt after sync hits the atomic lock</td><td><a href="evidence/20-claim.txt">20-claim.txt</a></td><td><span class="badge b-pass">PASS</span></td></tr>
+      <tr><td>S2b</td><td>TTL expiry — stale 1s claim swept; bob claims 2s later</td><td><a href="evidence/21-ttl.txt">21-ttl.txt</a></td><td><span class="badge b-pass">PASS</span></td></tr>
+      <tr><td>S3</td><td>Delivery — diff, green gate, hex rendering</td><td><a href="evidence/30-delivery.txt">30-delivery.txt</a></td><td><span class="badge b-pass">PASS</span></td></tr>
+      <tr><td>S4</td><td>Review gate — approve from <code>work</code> → <code>InvalidTransition</code>; alice approves</td><td><a href="evidence/20-claim.txt">20</a> · <a href="evidence/40-review.txt">40-review.txt</a></td><td><span class="badge b-pass">PASS</span></td></tr>
+      <tr><td>S4p</td><td>Self-approval probe — bob approves his own work</td><td><a href="evidence/41-selfapprove-probe.txt">41-selfapprove.txt</a></td><td><span class="badge b-rec">F2</span></td></tr>
+      <tr><td>S5</td><td>Sync — identical heads/events/pending; idempotent re-exchange</td><td><a href="evidence/50-sync.txt">50-sync.txt</a></td><td><span class="badge b-pass">PASS</span></td></tr>
+      <tr><td>S6</td><td>Immutability — full chain in Lamport order, identical on both replicas</td><td><a href="evidence/60-final.txt">60-final.txt</a></td><td><span class="badge b-pass">PASS</span></td></tr>
+      <tr><td>WT-1</td><td>The task itself — AC1–AC3</td><td><a href="evidence/30-delivery.txt">30-delivery.txt</a></td><td><span class="badge b-pass">PASS</span></td></tr>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Findings</h2>
+    <table>
+      <tr><td><b>F1</b></td><td>Signing secrets never leave the origin replica (D5): actors must be provisioned on their native machine; a directory-synced actor is verify-only elsewhere. Caught live in run 1 (<a href="evidence/run1-flawed-actor-provisioning/">transcripts kept</a>). Backlog: actor provisioning for a second machine.</td><td><span class="badge b-warn">process</span></td></tr>
+      <tr><td><b>F2</b></td><td><b>Self-approval not blocked.</b> bob submitted and approved WT-2 himself → <code>done</code>. The gate enforces the review <em>step</em>, not the review<em>er</em>. PRD says agents can't self-approve. <b>P1 for next sprint:</b> reject approval when the approver is an agent who authored the submission.</td><td><span class="badge b-rec">product gap</span></td></tr>
+      <tr><td><b>F3</b></td><td>Claims made concurrently before any sync both succeed locally and resolve at merge (D8 first-wins, proven in sprint-01 U3) — but the loser learns only from the log. Suggest a merge-time notice.</td><td><span class="badge b-warn">ux</span></td></tr>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Reproduce</h2>
+    <pre>cd walkthrough/uat && ./run.sh all   # rebuilds both replicas in /tmp, rewrites evidence/</pre>
+    <p class="small muted">Design: <a href="UAT.md">UAT.md</a> · analysis: <a href="SUMMARY.md">SUMMARY.md</a> · process: <a href="../../Sprints/TEMPLATE.md">Sprints/TEMPLATE.md</a> · decisions: <a href="../../PRD/PRD-v2.md">PRD-v2.md</a></p>
+  </div>
+
+  <div class="foot">
+    Snapshot of walkthrough run 3 (2026-11-11). Earlier runs are archived under
+    <code>evidence/run1-flawed-actor-provisioning/</code> and
+    <code>evidence/run2-task-created-on-wrong-replica/</code> — the UAT caught its own
+    scripting bugs before product behavior; both kept as honest process record.
+  </div>
+</div>
+</body>
+</html>

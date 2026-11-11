@@ -1,0 +1,22 @@
+# S6 — final board and the immutable chain
+$ rstask board
+
+== queue (0) ==
+(no tasks)
+
+== work (0) ==
+(no tasks)
+
+== review (0) ==
+(no tasks)
+
+== done (1) ==
+id        status    prio   title
+ad9ebb23  done  0      WT-2: ttl probe
+(exit 0)
+
+# full event chain of WT-1 (kinds in Lamport order):
+[]
+
+# same chain on replica b:
+[]

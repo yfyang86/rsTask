@@ -1,0 +1,61 @@
+# S1 — planning: init replica a (alice's machine)
+$ rstask init
+initialized /tmp/rstask-walkthrough/a.sqlite
+(exit 0)
+
+# so alice is created on a and bob on b)
+$ rstask actor new alice --kind human   (on a)
+{
+  "id": "d7708833-e342-4318-b381-b77a220497c1",
+  "kind": "human",
+  "name": "alice",
+  "created_at": "2026-11-11T07:53:57.449203Z",
+  "last_heartbeat_at": null
+}
+
+$ rstask init   (on b)
+initialized /tmp/rstask-walkthrough/b.sqlite
+$ rstask actor new bob --kind agent   (on b)
+{
+  "id": "2ecde5f0-4adf-4376-8849-c33a7664ae00",
+  "kind": "agent",
+  "name": "bob",
+  "created_at": "2026-11-11T07:53:57.494063Z",
+  "last_heartbeat_at": null
+}
+
+# file WT-1 with the Markdown spec as the task body
+$ rstask task new "WT-1: ..." --body @wt1-body.md --actor alice   (on a)
+
+# the creation is already a signed DAG event
+$ rstask task show 
+Error: task not found: 
+(exit 1, expected for negative probes)
+
+$ rstask task log 
+[]
+(exit 0)
+
+# first exchange: actor directories cross; WT-1 reaches replica b
+$ rstask sync export   (on a) > a1.bundle
+$ rstask sync import
+{
+  "added": 0,
+  "pending": 0,
+  "duplicates": 0,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+
+$ rstask sync export   (on b) > b1.bundle; rstask sync import < b1.bundle   (on a)
+$ rstask sync import
+{
+  "added": 0,
+  "pending": 0,
+  "duplicates": 0,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+

@@ -1,0 +1,45 @@
+# S6 — final board and the immutable chain
+$ rstask board
+
+== queue (0) ==
+(no tasks)
+
+== work (2) ==
+id        status    prio   title
+a6e5977b  work  0      WT-1: hex-render event ids in task log
+86a150f7  work  0      WT-2: ttl probe
+
+== review (0) ==
+(no tasks)
+
+== done (0) ==
+(no tasks)
+(exit 0)
+
+# full event chain of WT-1 (kinds in Lamport order):
+[
+  {
+    "kind": "task.created",
+    "lamport": 0,
+    "actor": "7f2974ce"
+  },
+  {
+    "kind": "task.claimed",
+    "lamport": 1,
+    "actor": "7f2974ce"
+  }
+]
+
+# same chain on replica b:
+[
+  {
+    "kind": "task.created",
+    "lamport": 0,
+    "actor": "7f2974ce"
+  },
+  {
+    "kind": "task.claimed",
+    "lamport": 1,
+    "actor": "7f2974ce"
+  }
+]

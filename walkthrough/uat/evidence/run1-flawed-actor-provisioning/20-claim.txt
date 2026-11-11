@@ -1,0 +1,51 @@
+# S2 — exclusive claim: bob takes WT-1 on replica b
+$ rstask task claim a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0 --actor cf6e9abe-aa10-422e-9e4e-58bbb21d089e
+Error: actor cf6e9abe-aa10-422e-9e4e-58bbb21d089e has no signing key (pre-sync actor or learned from a peer)
+(exit 1, expected for negative probes)
+
+$ rstask board
+
+== queue (1) ==
+id        status    prio   title
+a6e5977b  queue  0      WT-1: hex-render event ids in task log
+
+== work (0) ==
+(no tasks)
+
+== review (0) ==
+(no tasks)
+
+== done (0) ==
+(no tasks)
+(exit 0)
+
+# alice's concurrent claim on replica a must fail (ClaimConflict)
+$ rstask task claim a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0 --actor 7f2974ce-4fd9-4af4-8cbd-866f103ec22a
+{
+  "id": "774b1a48-ad6f-4c3e-a7a2-7b694ad0a668",
+  "task_id": "a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0",
+  "actor_id": "7f2974ce-4fd9-4af4-8cbd-866f103ec22a",
+  "claimed_at": "2026-11-11T07:39:10.900015Z",
+  "expires_at": "2026-11-11T07:54:10.900015Z",
+  "released_at": null,
+  "release_reason": null
+}
+(exit 0)
+
+# S4 gate probe (part 1): done is unreachable from work
+$ rstask task approve a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0 --actor 7f2974ce-4fd9-4af4-8cbd-866f103ec22a
+Error: invalid workflow transition: work --task.approved--> done (task a6e5977b-5f5b-4c2b-a8b8-02c6bbe337a0)
+(exit 1, expected for negative probes)
+
+# exchange a<-b so both replicas see the claim
+$ rstask sync export   (on b) > b1.bundle
+$ rstask sync import
+{
+  "added": 0,
+  "pending": 0,
+  "duplicates": 1,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+

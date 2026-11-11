@@ -1,0 +1,50 @@
+# S2 — exclusive claim: bob takes WT-1 on replica b
+$ rstask task claim a7205ee1-54ec-4b62-984f-59fbcc2c1149 --actor ae6988d7-9a20-424d-9b75-05753a0e27b9
+{
+  "id": "783143d7-f0b6-4881-8972-6cc503f9f261",
+  "task_id": "a7205ee1-54ec-4b62-984f-59fbcc2c1149",
+  "actor_id": "ae6988d7-9a20-424d-9b75-05753a0e27b9",
+  "claimed_at": "2026-11-11T07:57:52.487604Z",
+  "expires_at": "2026-11-11T08:12:52.487604Z",
+  "released_at": null,
+  "release_reason": null
+}
+(exit 0)
+
+$ rstask board
+
+== queue (0) ==
+(no tasks)
+
+== work (1) ==
+id        status    prio   title
+a7205ee1  work  0      WT-1: hex-render event ids in task log
+
+== review (0) ==
+(no tasks)
+
+== done (0) ==
+(no tasks)
+(exit 0)
+
+# then hits the atomic lock (ClaimConflict)
+$ rstask sync export   (on b) > b1c.bundle; rstask sync import < b1c.bundle   (on a)
+$ rstask sync import
+{
+  "added": 1,
+  "pending": 0,
+  "duplicates": 1,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+
+$ rstask task claim a7205ee1-54ec-4b62-984f-59fbcc2c1149 --actor d46d2622-32f5-4b37-841f-2fc3717eccb6
+Error: task a7205ee1-54ec-4b62-984f-59fbcc2c1149 is already claimed by ae6988d7-9a20-424d-9b75-05753a0e27b9
+(exit 1, expected for negative probes)
+
+# S4 gate probe (part 1): done is unreachable from work
+$ rstask task approve a7205ee1-54ec-4b62-984f-59fbcc2c1149 --actor d46d2622-32f5-4b37-841f-2fc3717eccb6
+Error: invalid workflow transition: work --task.approved--> done (task a7205ee1-54ec-4b62-984f-59fbcc2c1149)
+(exit 1, expected for negative probes)
+

@@ -1,0 +1,37 @@
+# S4 probe: can bob approve his OWN work? (PRD: agents can't self-approve)
+# WT-2 is held by bob (claimed after alice's TTL expiry); he submits, then approves.
+$ rstask task submit 86a150f7-0907-48de-870c-3c3bf8505588 --actor cf6e9abe-aa10-422e-9e4e-58bbb21d089e
+Error: actor cf6e9abe-aa10-422e-9e4e-58bbb21d089e has no signing key (pre-sync actor or learned from a peer)
+(exit 1, expected for negative probes)
+
+$ rstask task show 86a150f7-0907-48de-870c-3c3bf8505588
+{
+  "id": "86a150f7-0907-48de-870c-3c3bf8505588",
+  "title": "WT-2: ttl probe",
+  "body_md": "",
+  "status": "queue",
+  "priority": 0,
+  "created_by": "7f2974ce-4fd9-4af4-8cbd-866f103ec22a",
+  "created_at": "2026-11-11T07:39:10.952292Z",
+  "updated_at": "2026-11-11T07:39:10.952292Z"
+}
+(exit 0)
+
+# -> the attempt itself:
+$ rstask task approve 86a150f7-0907-48de-870c-3c3bf8505588 --actor cf6e9abe-aa10-422e-9e4e-58bbb21d089e
+Error: actor cf6e9abe-aa10-422e-9e4e-58bbb21d089e has no signing key (pre-sync actor or learned from a peer)
+(exit 1, expected for negative probes)
+
+$ rstask task show 86a150f7-0907-48de-870c-3c3bf8505588
+{
+  "id": "86a150f7-0907-48de-870c-3c3bf8505588",
+  "title": "WT-2: ttl probe",
+  "body_md": "",
+  "status": "queue",
+  "priority": 0,
+  "created_by": "7f2974ce-4fd9-4af4-8cbd-866f103ec22a",
+  "created_at": "2026-11-11T07:39:10.952292Z",
+  "updated_at": "2026-11-11T07:39:10.952292Z"
+}
+(exit 0)
+

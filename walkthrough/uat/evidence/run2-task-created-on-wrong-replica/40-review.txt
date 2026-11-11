@@ -1,0 +1,9 @@
+# S4 — review: alice approves WT-1 (review -> done)
+$ rstask task approve  --actor d7708833-e342-4318-b381-b77a220497c1
+Error: no rows returned by a query that expected to return at least one row
+(exit 1, expected for negative probes)
+
+$ rstask task show 
+Error: task not found: 
+(exit 1, expected for negative probes)
+

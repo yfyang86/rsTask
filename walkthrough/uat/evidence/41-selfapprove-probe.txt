@@ -1,0 +1,55 @@
+# S4 probe: can bob approve his OWN work? (PRD: agents can't self-approve)
+# WT-2 is held by bob (claimed after alice's TTL expiry); he submits, then approves.
+$ rstask task submit c4361039-7a0b-43ac-a30e-fb6aa1e64f92 --actor ae6988d7-9a20-424d-9b75-05753a0e27b9
+{
+  "id": "c4361039-7a0b-43ac-a30e-fb6aa1e64f92",
+  "title": "WT-2: ttl probe",
+  "body_md": "",
+  "status": "review",
+  "priority": 0,
+  "created_by": "d46d2622-32f5-4b37-841f-2fc3717eccb6",
+  "created_at": "2026-11-11T07:57:52.552758Z",
+  "updated_at": "2026-11-11T07:57:55.766325Z"
+}
+(exit 0)
+
+$ rstask task show c4361039-7a0b-43ac-a30e-fb6aa1e64f92
+{
+  "id": "c4361039-7a0b-43ac-a30e-fb6aa1e64f92",
+  "title": "WT-2: ttl probe",
+  "body_md": "",
+  "status": "review",
+  "priority": 0,
+  "created_by": "d46d2622-32f5-4b37-841f-2fc3717eccb6",
+  "created_at": "2026-11-11T07:57:52.552758Z",
+  "updated_at": "2026-11-11T07:57:55.766325Z"
+}
+(exit 0)
+
+# -> the attempt itself:
+$ rstask task approve c4361039-7a0b-43ac-a30e-fb6aa1e64f92 --actor ae6988d7-9a20-424d-9b75-05753a0e27b9
+{
+  "id": "c4361039-7a0b-43ac-a30e-fb6aa1e64f92",
+  "title": "WT-2: ttl probe",
+  "body_md": "",
+  "status": "done",
+  "priority": 0,
+  "created_by": "d46d2622-32f5-4b37-841f-2fc3717eccb6",
+  "created_at": "2026-11-11T07:57:52.552758Z",
+  "updated_at": "2026-11-11T07:57:55.790677Z"
+}
+(exit 0)
+
+$ rstask task show c4361039-7a0b-43ac-a30e-fb6aa1e64f92
+{
+  "id": "c4361039-7a0b-43ac-a30e-fb6aa1e64f92",
+  "title": "WT-2: ttl probe",
+  "body_md": "",
+  "status": "done",
+  "priority": 0,
+  "created_by": "d46d2622-32f5-4b37-841f-2fc3717eccb6",
+  "created_at": "2026-11-11T07:57:52.552758Z",
+  "updated_at": "2026-11-11T07:57:55.790677Z"
+}
+(exit 0)
+

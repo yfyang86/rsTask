@@ -1,0 +1,94 @@
+# S1 — planning: init replica a (alice's machine)
+$ rstask init
+initialized /tmp/rstask-walkthrough/a.sqlite
+(exit 0)
+
+# so alice is created on a and bob on b)
+$ rstask actor new alice --kind human   (on a)
+{
+  "id": "d46d2622-32f5-4b37-841f-2fc3717eccb6",
+  "kind": "human",
+  "name": "alice",
+  "created_at": "2026-11-11T07:57:52.343766Z",
+  "last_heartbeat_at": null
+}
+
+$ rstask init   (on b)
+initialized /tmp/rstask-walkthrough/b.sqlite
+$ rstask actor new bob --kind agent   (on b)
+{
+  "id": "ae6988d7-9a20-424d-9b75-05753a0e27b9",
+  "kind": "agent",
+  "name": "bob",
+  "created_at": "2026-11-11T07:57:52.377298Z",
+  "last_heartbeat_at": null
+}
+
+# file WT-1 with the Markdown spec as the task body (on a, by alice)
+$ rstask task new "WT-1: ..." --body @wt1-body.md --actor alice   (on a)
+{
+  "id": "a7205ee1-54ec-4b62-984f-59fbcc2c1149",
+  "title": "WT-1: hex-render event ids in task log",
+  "body_md": "## WT-1 — hex-render event ids in `rstask task log`\n\nSprint-01 debt: `task log` prints `event_id`/`signature`/`pubkey` as raw byte\narrays. Render them as hex; keep everything else unchanged.\n\n### Acceptance criteria\n- AC1: hex strings, not byte arrays (absent on pre-DAG rows).\n- AC2: output stays valid JSON; other fields unchanged.\n- AC3: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` green.",
+  "status": "queue",
+  "priority": 0,
+  "created_by": "d46d2622-32f5-4b37-841f-2fc3717eccb6",
+  "created_at": "2026-11-11T07:57:52.404629Z",
+  "updated_at": "2026-11-11T07:57:52.404629Z"
+}
+
+# the creation is already a signed DAG event
+$ rstask task show a7205ee1-54ec-4b62-984f-59fbcc2c1149
+{
+  "id": "a7205ee1-54ec-4b62-984f-59fbcc2c1149",
+  "title": "WT-1: hex-render event ids in task log",
+  "body_md": "## WT-1 — hex-render event ids in `rstask task log`\n\nSprint-01 debt: `task log` prints `event_id`/`signature`/`pubkey` as raw byte\narrays. Render them as hex; keep everything else unchanged.\n\n### Acceptance criteria\n- AC1: hex strings, not byte arrays (absent on pre-DAG rows).\n- AC2: output stays valid JSON; other fields unchanged.\n- AC3: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` green.",
+  "status": "queue",
+  "priority": 0,
+  "created_by": "d46d2622-32f5-4b37-841f-2fc3717eccb6",
+  "created_at": "2026-11-11T07:57:52.404629Z",
+  "updated_at": "2026-11-11T07:57:52.404629Z"
+}
+(exit 0)
+
+$ rstask task log a7205ee1-54ec-4b62-984f-59fbcc2c1149
+[
+  {
+    "actor_id": "d46d2622-32f5-4b37-841f-2fc3717eccb6",
+    "at": "2026-11-11T07:57:52.404629Z",
+    "event_id": "4ef4424cd659205222263e839dcbe913560c422de250bbcb41ccb807fce23869",
+    "kind": "task.created",
+    "lamport": 0,
+    "parents": "[]",
+    "payload": "{\"body_md\":\"## WT-1 — hex-render event ids in `rstask task log`\\n\\nSprint-01 debt: `task log` prints `event_id`/`signature`/`pubkey` as raw byte\\narrays. Render them as hex; keep everything else unchanged.\\n\\n### Acceptance criteria\\n- AC1: hex strings, not byte arrays (absent on pre-DAG rows).\\n- AC2: output stays valid JSON; other fields unchanged.\\n- AC3: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` green.\",\"title\":\"WT-1: hex-render event ids in task log\"}",
+    "pubkey": "399c05980e165489c063e73bb7628bc66ffff77dffd5f8bd20b42f0c1e22b634",
+    "seq": 1,
+    "signature": "b5bc9ae83db1e8df06dd96217aa004223df94c4a83e0dc71a21975f6c1f809496bd6d5fe4ec0b51be6afbf9174d61d68aa472e82fbdd0535810a326526922304",
+    "task_id": "a7205ee1-54ec-4b62-984f-59fbcc2c1149"
+  }
+]
+(exit 0)
+
+# first exchange: actor directories cross; WT-1 reaches replica b
+$ rstask sync export   (on a) > a1.bundle
+$ rstask sync import
+{
+  "added": 1,
+  "pending": 0,
+  "duplicates": 0,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+
+$ rstask sync export   (on b) > b1.bundle; rstask sync import < b1.bundle   (on a)
+$ rstask sync import
+{
+  "added": 0,
+  "pending": 0,
+  "duplicates": 1,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+

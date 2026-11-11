@@ -1,0 +1,27 @@
+# S4 — review: alice approves WT-1 (review -> done)
+$ rstask task approve a7205ee1-54ec-4b62-984f-59fbcc2c1149 --actor d46d2622-32f5-4b37-841f-2fc3717eccb6
+{
+  "id": "a7205ee1-54ec-4b62-984f-59fbcc2c1149",
+  "title": "WT-1: hex-render event ids in task log",
+  "body_md": "## WT-1 — hex-render event ids in `rstask task log`\n\nSprint-01 debt: `task log` prints `event_id`/`signature`/`pubkey` as raw byte\narrays. Render them as hex; keep everything else unchanged.\n\n### Acceptance criteria\n- AC1: hex strings, not byte arrays (absent on pre-DAG rows).\n- AC2: output stays valid JSON; other fields unchanged.\n- AC3: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` green.",
+  "status": "done",
+  "priority": 0,
+  "created_by": "d46d2622-32f5-4b37-841f-2fc3717eccb6",
+  "created_at": "2026-11-11T07:57:52.404629Z",
+  "updated_at": "2026-11-11T07:57:55.742920Z"
+}
+(exit 0)
+
+$ rstask task show a7205ee1-54ec-4b62-984f-59fbcc2c1149
+{
+  "id": "a7205ee1-54ec-4b62-984f-59fbcc2c1149",
+  "title": "WT-1: hex-render event ids in task log",
+  "body_md": "## WT-1 — hex-render event ids in `rstask task log`\n\nSprint-01 debt: `task log` prints `event_id`/`signature`/`pubkey` as raw byte\narrays. Render them as hex; keep everything else unchanged.\n\n### Acceptance criteria\n- AC1: hex strings, not byte arrays (absent on pre-DAG rows).\n- AC2: output stays valid JSON; other fields unchanged.\n- AC3: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` green.",
+  "status": "done",
+  "priority": 0,
+  "created_by": "d46d2622-32f5-4b37-841f-2fc3717eccb6",
+  "created_at": "2026-11-11T07:57:52.404629Z",
+  "updated_at": "2026-11-11T07:57:55.742920Z"
+}
+(exit 0)
+

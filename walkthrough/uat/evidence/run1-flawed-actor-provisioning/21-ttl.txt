@@ -1,0 +1,53 @@
+# S2b — TTL expiry: alice claims a probe task with a 1s TTL and goes silent
+$ rstask task new "WT-2: ttl probe" --actor alice   (on a)
+{
+  "id": "86a150f7-0907-48de-870c-3c3bf8505588",
+  "title": "WT-2: ttl probe",
+  "body_md": "",
+  "status": "queue",
+  "priority": 0,
+  "created_by": "7f2974ce-4fd9-4af4-8cbd-866f103ec22a",
+  "created_at": "2026-11-11T07:39:10.952292Z",
+  "updated_at": "2026-11-11T07:39:10.952292Z"
+}
+
+$ rstask task claim 86a150f7-0907-48de-870c-3c3bf8505588 --actor 7f2974ce-4fd9-4af4-8cbd-866f103ec22a --ttl-secs 1
+{
+  "id": "045097be-da9d-46c0-85f4-6b9859c33cca",
+  "task_id": "86a150f7-0907-48de-870c-3c3bf8505588",
+  "actor_id": "7f2974ce-4fd9-4af4-8cbd-866f103ec22a",
+  "claimed_at": "2026-11-11T07:39:10.976951Z",
+  "expires_at": "2026-11-11T07:39:11.976951Z",
+  "released_at": null,
+  "release_reason": null
+}
+(exit 0)
+
+# ... alice's process dies; 2s later:
+$ rstask sync export   (on a) > a2.bundle; rstask sync import < a2.bundle   (on b)
+$ rstask sync import
+{
+  "added": 3,
+  "pending": 0,
+  "duplicates": 1,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+
+# bob claims the stale task on replica b — the sweep must free it
+$ rstask task claim 86a150f7-0907-48de-870c-3c3bf8505588 --actor cf6e9abe-aa10-422e-9e4e-58bbb21d089e
+Error: actor cf6e9abe-aa10-422e-9e4e-58bbb21d089e has no signing key (pre-sync actor or learned from a peer)
+(exit 1, expected for negative probes)
+
+$ rstask sync export   (on b) > b2.bundle; rstask sync import < b2.bundle   (on a)
+$ rstask sync import
+{
+  "added": 0,
+  "pending": 0,
+  "duplicates": 4,
+  "rejected": 0,
+  "rejected_ids": []
+}
+(exit 0)
+
