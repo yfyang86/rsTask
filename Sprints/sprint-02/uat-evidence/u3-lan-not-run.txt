@@ -1,0 +1,4 @@
+# U3 — LAN sync by hand
+NOT RUN: this environment is a single container with no second host.
+To run: host A  `RSTASK_P2P_TOKEN=… rstask p2p listen --bind 0.0.0.0:7701`,
+        host B  `RSTASK_P2P_TOKEN=… rstask p2p sync <ID>@<A's LAN address>:7701`.

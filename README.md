@@ -89,5 +89,24 @@ rstask sync status                             # heads, event count, pending
 ```
 
 Concurrent claims resolve deterministically on every replica: first claim by
-`(lamport, event_id)` wins, losers stay in the log but are ineffective. Wire
-transport (iroh QUIC) is sprint 02.
+`(lamport, event_id)` wins, losers stay in the log but are ineffective.
+
+## Sync over the network (sprint 02)
+
+Replicas reconcile directly over iroh QUIC: bucket fingerprints → id diff →
+only the missing events, both ways. Peers must share the workspace token; what
+a received event may do is still decided by its signature and the merge rules.
+
+```sh
+export RSTASK_P2P_TOKEN=…                    # shared secret; or p2p.token
+rstask p2p listen --bind 0.0.0.0:7701        # host A: prints {"spec": "ID@host:port", …}
+rstask p2p sync ID@a.example:7701            # host B: two-way sync, remembers the peer
+rstask p2p sync                              # every known peer
+rstask p2p peer add ID@HOST:PORT; rstask p2p peer list; rstask p2p status
+```
+
+`RSTASK_P2P_RELAY` / `p2p.relay`: `default` (n0's public relays and DNS, dial by
+id alone), `disabled` (direct addresses only — LAN, tests), or your own relay
+URL. The node's network identity is `node.key` beside the database. To work on
+a second replica an actor's key file must be carried to that replica's key
+directory.

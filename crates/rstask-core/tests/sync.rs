@@ -501,3 +501,32 @@ async fn s06_concurrent_dependency_edits_converge() {
     assert_eq!(da, db, "replicas agree on the dependency set");
     assert!(da.contains(&y.id));
 }
+
+// ---- Sprint 02: reconcile helpers (sync steps 2 and 3) ----
+
+#[tokio::test]
+async fn s02_ids_and_events_by_bucket() {
+    let a = store().await;
+    let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
+    for i in 0..5 {
+        a.create_task(&format!("t{i}"), "", &alice.id)
+            .await
+            .unwrap();
+    }
+    let buckets = a.buckets().await.unwrap();
+    assert_eq!((buckets.len(), buckets[0].count), (1, 6));
+    let ids = a.ids_in_buckets(&[0]).await.unwrap();
+    assert_eq!(ids.len(), 6, "every event of bucket 0");
+    assert!(a.ids_in_buckets(&[7]).await.unwrap().is_empty());
+
+    // The events come back parents-first whatever order the ids are in, and
+    // a replica fed exactly those converges.
+    let mut shuffled = ids.clone();
+    shuffled.reverse();
+    let events = a.events_by_id(&shuffled).await.unwrap();
+    let b = store().await;
+    let m = b.receive_events(&events).await.unwrap();
+    assert_eq!((m.added, m.pending, m.rejected), (6, 0, 0), "{m:?}");
+    assert!(boards_equal(&a, &b).await);
+    assert_eq!(a.buckets().await.unwrap(), b.buckets().await.unwrap());
+}

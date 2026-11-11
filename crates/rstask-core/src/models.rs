@@ -201,6 +201,17 @@ pub struct TaskDetail {
     pub waiting_on: Vec<String>,
 }
 
+/// A replica this one syncs with (PRD-v2 D1).
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct Peer {
+    /// iroh endpoint id.
+    pub id: String,
+    /// Comma-separated direct socket addresses; empty means dial by id.
+    pub addrs: String,
+    /// Last successful sync.
+    pub last_seen: Option<DateTime<Utc>>,
+}
+
 /// Immutable log entry. `seq` is a monotonic AUTOINCREMENT — the event log
 /// is append-only by construction.
 ///

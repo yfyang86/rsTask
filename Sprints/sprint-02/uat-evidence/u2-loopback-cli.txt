@@ -1,0 +1,23 @@
+# U2 — loopback CLI sync
+$ A: p2p listen --bind 127.0.0.1:<port>
+{"node":"NODE_A","relay":"disabled","spec":"NODE_A@127.0.0.1:<port>"}
+$ B (empty): p2p sync <A's spec>
+{"received":3,"sent":0}
+diverged: A has 1 tasks, B has 4
+$ B: p2p sync            (no argument: every known peer)
+{"received":2,"sent":3,"refused_by_peer":0}
+A board:
+  queue from b 1
+  queue from b 2
+  queue from b 3
+  review shared task 
+B board:
+  queue from b 1
+  queue from b 2
+  queue from b 3
+  review shared task 
+boards identical: yes   heads identical: yes
+$ B: p2p sync again
+{"received":0,"sent":0}
+$ B: p2p status
+{"node":"NODE_B","peers":[{"addrs":"127.0.0.1:<port>","id":"NODE_A","last_seen":"<time>"}],"relay":"disabled","token":"set"}

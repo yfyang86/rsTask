@@ -22,8 +22,8 @@ use crate::error::{Error, Result};
 use crate::event::{EventId, Signable, StoredEvent};
 use crate::keys::Keyring;
 use crate::models::{
-    Actor, ActorKind, Claim, Event, Rejected, ReleaseReason, Role, Roles, Submission, Submitted,
-    Task, TaskDetail, TaskStatus,
+    Actor, ActorKind, Claim, Event, Peer, Rejected, ReleaseReason, Role, Roles, Submission,
+    Submitted, Task, TaskDetail, TaskStatus,
 };
 use crate::sync::{Bucket, Merge, SyncBundle, BUCKET};
 
@@ -31,7 +31,8 @@ const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_dag.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_links_roles.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_protected.sql");
-const SCHEMA_VERSION: i64 = 4;
+const MIGRATION_0005: &str = include_str!("../migrations/0005_peers.sql");
+const SCHEMA_VERSION: i64 = 5;
 
 /// Ordered, versioned migrations guarded by `PRAGMA user_version`, so reopening
 /// an existing database is a no-op (ALTER migrations are not idempotent).
@@ -50,6 +51,9 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     }
     if version < 4 {
         sqlx::raw_sql(MIGRATION_0004).execute(pool).await?;
+    }
+    if version < 5 {
+        sqlx::raw_sql(MIGRATION_0005).execute(pool).await?;
     }
     if version != SCHEMA_VERSION {
         sqlx::raw_sql(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
@@ -1293,11 +1297,12 @@ impl Store {
         if indices.is_empty() {
             return Ok(vec![]);
         }
-        let marks: Vec<String> = vec!["?".into(); indices.len()];
+        // Plain `?` placeholders throughout: sqlx numbers them from 1 again
+        // after a `?1`, so mixing the two styles binds the wrong values.
+        let marks = vec!["?"; indices.len()].join(",");
         let sql = format!(
             "SELECT event_id FROM events
-             WHERE event_id IS NOT NULL AND lamport / ?1 IN ({}) ORDER BY event_id",
-            marks.join(",")
+             WHERE event_id IS NOT NULL AND lamport / ? IN ({marks}) ORDER BY event_id"
         );
         let mut q = sqlx::query_as::<_, (Vec<u8>,)>(&sql).bind(BUCKET as i64);
         for i in indices {
@@ -1310,49 +1315,82 @@ impl Store {
     /// The signed DAG, for `rstask sync export`. Actors travel in it as
     /// `actor.created` events.
     pub async fn export_bundle(&self) -> Result<SyncBundle> {
-        // Alias keeps clippy's type_complexity quiet.
-        type Row = (
-            i64,
-            String,
-            String,
-            String,
-            String,
-            String,
-            DateTime<Utc>,
-            Vec<u8>,
-            Vec<u8>,
-        );
-        let rows: Vec<Row> = sqlx::query_as(
-            "SELECT lamport, parents, actor_id, task_id, kind, payload, at, signature, pubkey
-                 FROM events
-                 WHERE event_id IS NOT NULL AND signature IS NOT NULL
-                 ORDER BY lamport, event_id",
-        )
+        let rows: Vec<EventRow> = sqlx::query_as(&format!(
+            "SELECT {EVENT_COLUMNS} FROM events
+             WHERE event_id IS NOT NULL AND signature IS NOT NULL
+             ORDER BY lamport, event_id"
+        ))
         .fetch_all(&self.pool)
         .await?;
-        let events = rows
-            .into_iter()
-            .map(
-                |(lamport, parents, actor_id, task_id, kind, payload, at, sig, pubkey)| {
-                    StoredEvent {
-                        body: Signable {
-                            lamport: lamport as u64,
-                            parents: parse_parents(&parents),
-                            actor_id,
-                            task_id,
-                            kind,
-                            payload,
-                            at,
-                        },
-                        pubkey: to_id(&pubkey),
-                        sig: sig.as_slice().try_into().expect("sig is 64 bytes"),
-                    }
-                    .encode()
-                },
-            )
-            .collect();
+        Ok(SyncBundle {
+            events: rows.into_iter().map(encode_row).collect(),
+        })
+    }
 
-        Ok(SyncBundle { events })
+    /// The encoded events with these ids, parents first (sync step 3).
+    /// Unknown ids are skipped.
+    pub async fn events_by_id(&self, ids: &[EventId]) -> Result<Vec<Vec<u8>>> {
+        let mut rows: Vec<EventRow> = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT {EVENT_COLUMNS} FROM events
+                 WHERE signature IS NOT NULL AND event_id IN ({marks})"
+            );
+            let mut q = sqlx::query_as::<_, EventRow>(&sql);
+            for id in chunk {
+                q = q.bind(id.to_vec());
+            }
+            rows.extend(q.fetch_all(&self.pool).await?);
+        }
+        // Lamport order is causal order: a parent's clock is always lower.
+        rows.sort_by_key(|row| row.0);
+        Ok(rows.into_iter().map(encode_row).collect())
+    }
+
+    /// Merge encoded events from a peer: `receive_bundle` without the wrapper.
+    pub async fn receive_events(&self, events: &[Vec<u8>]) -> Result<Merge> {
+        self.receive_bundle(&SyncBundle {
+            events: events.to_vec(),
+        })
+        .await
+    }
+
+    // ----------------------------------------------------------------- peers
+
+    /// Remember a peer to sync with (replaces its addresses).
+    pub async fn add_peer(&self, id: &str, addrs: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO peers (id, addrs) VALUES (?, ?)
+             ON CONFLICT (id) DO UPDATE SET addrs = excluded.addrs",
+        )
+        .bind(id)
+        .bind(addrs)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_peers(&self) -> Result<Vec<Peer>> {
+        Ok(sqlx::query_as::<_, Peer>("SELECT * FROM peers ORDER BY id")
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
+    /// Record a successful sync with a peer, learning it (and any direct
+    /// addresses it was dialed at) if it was unknown.
+    pub async fn touch_peer(&self, id: &str, addrs: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO peers (id, addrs, last_seen) VALUES (?1, ?2, ?3)
+             ON CONFLICT (id) DO UPDATE SET last_seen = ?3,
+                 addrs = CASE WHEN ?2 = '' THEN addrs ELSE ?2 END",
+        )
+        .bind(id)
+        .bind(addrs)
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Apply a peer bundle (PRD-v2 sync). Events are verified, parked on
@@ -1578,6 +1616,39 @@ async fn require_claim_tx(
             to: to.to_string(),
         }),
     }
+}
+
+/// An event row as needed to rebuild its signed envelope.
+type EventRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    DateTime<Utc>,
+    Vec<u8>,
+    Vec<u8>,
+);
+const EVENT_COLUMNS: &str =
+    "lamport, parents, actor_id, task_id, kind, payload, at, signature, pubkey";
+
+fn encode_row(row: EventRow) -> Vec<u8> {
+    let (lamport, parents, actor_id, task_id, kind, payload, at, sig, pubkey) = row;
+    StoredEvent {
+        body: Signable {
+            lamport: lamport as u64,
+            parents: parse_parents(&parents),
+            actor_id,
+            task_id,
+            kind,
+            payload,
+            at,
+        },
+        pubkey: to_id(&pubkey),
+        sig: sig.as_slice().try_into().expect("sig is 64 bytes"),
+    }
+    .encode()
 }
 
 enum Insert {

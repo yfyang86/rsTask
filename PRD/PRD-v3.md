@@ -70,14 +70,16 @@ What does not: a process that can write a replica's SQLite file can corrupt *tha
 replica's derived tables (other replicas are unaffected and will not accept the
 result). Key files are plaintext on disk (`0600`). There is no key rotation or
 revocation; losing the root key ends provisioning. Agents that must not trust each
-other need their own replica and key directory, not just their own MCP server.
+other need their own replica and key directory, not just their own MCP server — and
+since sprint 02 can have one: replicas sync over `rstask p2p`, where the workspace
+token decides who may connect and the rules above decide what a received event may do.
 
 ## Sprints
 
 | Sprint | Theme | Status |
 |-------:|-------|--------|
 | 01 | Event DAG + offline reconciliation | done |
-| 02 | iroh transport | planned, **deferred** behind 07 — one shared SQLite file already serves many agents on one host |
+| 02 | iroh transport (run after 07) | done |
 | 03 | Gate correctness: A1–A3 / G1–G3 | done |
 | 04 | Claim liveness and handoff: M1, M2 | done |
 | 05 | MCP server with `claim_next`: M3 | done |

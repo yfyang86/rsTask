@@ -60,6 +60,9 @@ pub enum Error {
         current: String,
     },
 
+    #[error("network: {0}")]
+    Net(String),
+
     #[error("invalid sync bundle: {0}")]
     InvalidBundle(String),
 }

@@ -49,8 +49,15 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct P2pConfig {
+    /// Reserved: the `rstask p2p` commands are the switch.
     pub enabled: bool,
     pub transport: String,
+    /// `default` (n0 public relays), `disabled` (direct only), or a relay URL.
+    pub relay: String,
+    /// Shared workspace token; prefer env `RSTASK_P2P_TOKEN`. Never logged.
+    pub token: String,
+    /// Fixed UDP socket for `p2p listen`, e.g. `0.0.0.0:7701`.
+    pub bind: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -87,6 +94,9 @@ impl Default for P2pConfig {
         Self {
             enabled: false,
             transport: "quic".into(),
+            relay: "default".into(),
+            token: String::new(),
+            bind: None,
         }
     }
 }
@@ -119,6 +129,15 @@ impl Config {
             if let Ok(port) = v.parse() {
                 self.server.port = port;
             }
+        }
+        if let Ok(v) = std::env::var("RSTASK_P2P_TOKEN") {
+            self.p2p.token = v;
+        }
+        if let Ok(v) = std::env::var("RSTASK_P2P_RELAY") {
+            self.p2p.relay = v;
+        }
+        if let Ok(v) = std::env::var("RSTASK_P2P_BIND") {
+            self.p2p.bind = Some(v);
         }
         if let Ok(v) = std::env::var("RSTASK_AUTH_KEY_DIR") {
             self.auth.key_dir = Some(PathBuf::from(v));
