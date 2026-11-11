@@ -1,0 +1,18 @@
+# RsTask configuration — layered: defaults → this file → env (RSTASK_*) → CLI flags.
+
+[server]
+port = 7700
+cors_origins = ["http://localhost:3000"]
+
+[auth]
+mode = "offline"           # offline | oidc
+key_algorithm = "ed25519"  # default; RSA only for legacy
+
+[storage]
+db_path = ".rstask/rstask.sqlite"
+markdown_root = ".rstask/content"
+attachment_root = ".rstask/attachments"
+
+[p2p]
+enabled = false            # off by default
+transport = "quic"

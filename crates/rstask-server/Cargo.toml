@@ -1,0 +1,15 @@
+[package]
+name = "rstask-server"
+description = "RsTask local REST server (Axum) — read-only dashboard API for the Web UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rstask-core.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

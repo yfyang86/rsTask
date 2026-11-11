@@ -1,0 +1,13 @@
+[package]
+name = "rstask-tui"
+description = "RsTask TUI (ratatui) — kanban view over the shared core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rstask-core.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
