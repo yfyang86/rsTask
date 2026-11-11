@@ -1,0 +1,7 @@
+# U3 — no agent self-approval
+$ task approve --actor bot
+Error: actor bot is not permitted to approve its own submission
+exit=1
+status: review   log: ["task.created","task.claimed","task.submitted"]
+$ task approve --actor bot2
+done

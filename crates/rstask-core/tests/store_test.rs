@@ -158,10 +158,7 @@ async fn force_release_frees_stale_claim() {
         .unwrap();
 
     // Alice force-releases the agent's stale claim.
-    store
-        .release_claim(&task.id, &agent.id, true)
-        .await
-        .unwrap();
+    store.release_claim(&task.id, &alice, true).await.unwrap();
     assert_eq!(
         store.get_task(&task.id).await.unwrap().status,
         TaskStatus::Queue
@@ -210,4 +207,78 @@ async fn unknown_actor_rejected() {
         .await
         .unwrap_err();
     assert!(matches!(err, Error::ActorNotFound(_)));
+}
+
+// ---- Sprint 03: gate correctness (UAT U3, U4) ----
+
+#[tokio::test]
+async fn agent_cannot_approve_own_submission() {
+    let (store, alice) = setup().await;
+    let task = store.create_task("t", "", &alice).await.unwrap();
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let peer = store.create_actor(ActorKind::Agent, "peer").await.unwrap();
+    store
+        .claim_task(&task.id, &bot.id, Duration::from_secs(60))
+        .await
+        .unwrap();
+    store.submit_for_review(&task.id, &bot.id).await.unwrap();
+
+    let err = store.approve(&task.id, &bot.id).await.unwrap_err();
+    assert!(matches!(err, Error::NotPermitted { .. }), "got {err:?}");
+    assert_eq!(
+        store.get_task(&task.id).await.unwrap().status,
+        TaskStatus::Review
+    );
+    // The refusal leaves no trace in the log.
+    let events = store.list_events(&task.id).await.unwrap();
+    assert!(!events.iter().any(|e| e.kind == "task.approved"));
+
+    // A different agent may review it.
+    store.approve(&task.id, &peer.id).await.unwrap();
+    assert_eq!(
+        store.get_task(&task.id).await.unwrap().status,
+        TaskStatus::Done
+    );
+}
+
+#[tokio::test]
+async fn only_humans_force_release() {
+    let (store, alice) = setup().await;
+    let task = store.create_task("t", "", &alice).await.unwrap();
+    let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let peer = store.create_actor(ActorKind::Agent, "peer").await.unwrap();
+    store
+        .claim_task(&task.id, &bot.id, Duration::from_secs(3600))
+        .await
+        .unwrap();
+
+    // An agent can neither force another's claim nor plainly release it.
+    let err = store
+        .release_claim(&task.id, &peer.id, true)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::NotPermitted { .. }), "got {err:?}");
+    let err = store
+        .release_claim(&task.id, &peer.id, false)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::ClaimConflict { .. }), "got {err:?}");
+    assert_eq!(
+        store.get_task(&task.id).await.unwrap().status,
+        TaskStatus::Work
+    );
+
+    // The human's forced release is signed by the human and names the claim.
+    store.release_claim(&task.id, &alice, true).await.unwrap();
+    let events = store.list_events(&task.id).await.unwrap();
+    let forced = events
+        .iter()
+        .find(|e| e.kind == "claim.force_released")
+        .expect("force event logged");
+    assert_eq!(forced.actor_id.as_deref(), Some(alice.as_str()));
+    assert!(
+        forced.payload.contains("claim_id\":\""),
+        "{}",
+        forced.payload
+    );
 }

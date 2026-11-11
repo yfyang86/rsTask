@@ -1,0 +1,4 @@
+# U1 — reject -> re-claim replicates
+A status: work
+B status: work
+B log:    ["task.created","task.claimed","task.submitted","task.changes_requested","task.claimed"]

@@ -234,3 +234,94 @@ async fn merge_survives_partial_parents_then_catches_up() {
     let _ = t1;
     assert!(boards_equal(&a, &b).await, "caught up: {m:?}");
 }
+
+// ---- Sprint 03: gate correctness (UAT U1, U2, U4) ----
+
+#[tokio::test]
+async fn s03_u1_reject_then_reclaim_replicates() {
+    let a = store().await;
+    let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
+    let bot = a.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let task = a.create_task("rework", "", &alice.id).await.unwrap();
+    let ttl = Duration::from_secs(900);
+    a.claim_task(&task.id, &bot.id, ttl).await.unwrap();
+    a.submit_for_review(&task.id, &bot.id).await.unwrap();
+
+    // B follows along incrementally; C imports everything at the end.
+    let b = store().await;
+    exchange(&a, &b).await;
+
+    a.request_changes(&task.id, &alice.id).await.unwrap();
+    a.claim_task(&task.id, &bot.id, ttl).await.unwrap();
+    exchange(&a, &b).await;
+    let c = store().await;
+    exchange(&a, &c).await;
+
+    assert_eq!(a.get_task(&task.id).await.unwrap().status, TaskStatus::Work);
+    for (name, s) in [("b", &b), ("c", &c)] {
+        assert!(
+            boards_equal(&a, s).await,
+            "{name} matches origin\na: {:?}\n{name}: {:?}",
+            a.list_tasks(None).await.unwrap(),
+            s.list_tasks(None).await.unwrap()
+        );
+        assert_eq!(active_claims(s, &task.id).await, vec![bot.id.clone()]);
+    }
+}
+
+#[tokio::test]
+async fn s03_u2_concurrent_approve_and_reject_converge() {
+    let a = store().await;
+    let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
+    let bot = a.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let task = a
+        .create_task("contested review", "", &alice.id)
+        .await
+        .unwrap();
+    a.claim_task(&task.id, &bot.id, Duration::from_secs(900))
+        .await
+        .unwrap();
+    a.submit_for_review(&task.id, &bot.id).await.unwrap();
+
+    let b = store().await;
+    exchange(&a, &b).await;
+    let carol = b.create_actor(ActorKind::Human, "carol").await.unwrap();
+
+    // Disconnected reviewers disagree.
+    a.approve(&task.id, &alice.id).await.unwrap();
+    b.request_changes(&task.id, &carol.id).await.unwrap();
+
+    exchange(&a, &b).await;
+    exchange(&b, &a).await;
+
+    // Same lamport on both sides ⇒ the winner is hash-determined: assert
+    // agreement, not which verdict.
+    let sa = a.get_task(&task.id).await.unwrap().status;
+    let sb = b.get_task(&task.id).await.unwrap().status;
+    assert_eq!(sa, sb, "replicas agree on the review verdict");
+    assert!(sa == TaskStatus::Done || sa == TaskStatus::Queue);
+    assert!(boards_equal(&a, &b).await, "boards converge");
+}
+
+#[tokio::test]
+async fn s03_u4_force_release_replicates() {
+    let a = store().await;
+    let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
+    let bot = a.create_actor(ActorKind::Agent, "bot").await.unwrap();
+    let task = a.create_task("hung", "", &alice.id).await.unwrap();
+    a.claim_task(&task.id, &bot.id, Duration::from_secs(900))
+        .await
+        .unwrap();
+    let b = store().await;
+    exchange(&a, &b).await;
+    assert_eq!(active_claims(&b, &task.id).await.len(), 1);
+
+    a.release_claim(&task.id, &alice.id, true).await.unwrap();
+    exchange(&a, &b).await;
+
+    assert_eq!(
+        b.get_task(&task.id).await.unwrap().status,
+        TaskStatus::Queue
+    );
+    assert!(active_claims(&b, &task.id).await.is_empty());
+}

@@ -395,17 +395,26 @@ impl Store {
         Ok(claim)
     }
 
-    /// Release a claim. `forced = true` models the human force-release path
-    /// for stale agent claims.
+    /// Release a claim. Plain release: the actor's own claim. `forced = true`
+    /// is the human force-release path: a human actor releases whoever holds
+    /// the task (PRD-v3 G3).
     pub async fn release_claim(&self, task_id: &str, actor_id: &str, forced: bool) -> Result<()> {
+        if forced && self.get_actor(actor_id).await?.kind != ActorKind::Human {
+            return Err(Error::NotPermitted {
+                actor: actor_id.to_string(),
+                action: "force-release a claim (humans only)".into(),
+            });
+        }
         let signing_key = self.signing_key(actor_id).await?;
         let mut tx = self.pool.begin().await?;
 
         let claim_id: Option<String> = sqlx::query_scalar(
-            "SELECT id FROM claims WHERE task_id = ? AND actor_id = ? AND released_at IS NULL",
+            "SELECT id FROM claims
+             WHERE task_id = ?1 AND released_at IS NULL AND (?3 OR actor_id = ?2)",
         )
         .bind(task_id)
         .bind(actor_id)
+        .bind(forced)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -521,12 +530,28 @@ impl Store {
         self.get_task(task_id).await
     }
 
-    /// Approve: review → done. Deliberately has no claim requirement — any
-    /// actor (in practice: a human reviewer) can approve, which is what
-    /// enforces "agents can't self-approve" at the gate level.
+    /// Approve: review → done. No claim requirement — any actor can review —
+    /// except that an agent cannot approve its own submission (PRD-v3 G2).
     pub async fn approve(&self, task_id: &str, actor_id: &str) -> Result<Task> {
         let signing_key = self.signing_key(actor_id).await?;
         let mut tx = self.pool.begin().await?;
+        let submitter: Option<String> = sqlx::query_scalar(
+            "SELECT actor_id FROM events
+             WHERE task_id = ? AND kind = 'task.submitted' AND event_id IS NOT NULL
+             ORDER BY lamport DESC, event_id DESC LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten();
+        if submitter.as_deref() == Some(actor_id)
+            && self.get_actor(actor_id).await?.kind == ActorKind::Agent
+        {
+            return Err(Error::NotPermitted {
+                actor: actor_id.to_string(),
+                action: "approve its own submission".into(),
+            });
+        }
         self.transition_tx(
             &mut tx,
             &signing_key,
@@ -1123,42 +1148,32 @@ async fn apply_effect_tx(
             .execute(&mut **tx)
             .await?;
         }
-        // Claims fold per task below (D8); approved/rejected are status-guarded.
-        "task.claimed" | "claim.released" | "claim.force_released" | "task.submitted" => {
+        // Claims and status fold per task below (D8, PRD-v3 G1).
+        "task.claimed"
+        | "claim.released"
+        | "claim.force_released"
+        | "task.submitted"
+        | "task.approved"
+        | "task.changes_requested" => {
             refold_task_tx(tx, &ev.body.task_id).await?;
-        }
-        "task.approved" => {
-            sqlx::query(
-                "UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ? AND status = 'review'",
-            )
-            .bind(ev.body.at)
-            .bind(&ev.body.task_id)
-            .execute(&mut **tx)
-            .await?;
-        }
-        "task.changes_requested" => {
-            sqlx::query(
-                "UPDATE tasks SET status = 'queue', updated_at = ? WHERE id = ? AND status = 'review'",
-            )
-            .bind(ev.body.at)
-            .bind(&ev.body.task_id)
-            .execute(&mut **tx)
-            .await?;
         }
         _ => {} // Unknown kinds are logged but have no effect (forward compat).
     }
     Ok(())
 }
 
-/// Re-fold a task's claim events in `(lamport, event_id)` order (PRD-v2 D8):
-/// the first claim wins the lock; later concurrent claims stay in the log but
-/// are ineffective. Recomputed wholesale on every claim-affecting merge so the
-/// result never depends on arrival order.
+/// Re-fold a task's workflow events in `(lamport, event_id)` order: the first
+/// claim wins the lock, later concurrent claims stay in the log but are
+/// ineffective (PRD-v2 D8); the status walks the gate, and an event that does
+/// not fit the status reached so far is ineffective too (PRD-v3 G1).
+/// Recomputed wholesale on every workflow merge so the result never depends
+/// on arrival order.
 async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &str) -> Result<()> {
     let rows: Vec<(String, String, DateTime<Utc>, String)> = sqlx::query_as(
         "SELECT kind, actor_id, at, payload FROM events
          WHERE task_id = ?1 AND event_id IS NOT NULL
-           AND kind IN ('task.claimed','claim.released','claim.force_released','task.submitted')
+           AND kind IN ('task.claimed','claim.released','claim.force_released',
+                        'task.submitted','task.approved','task.changes_requested')
          ORDER BY lamport, event_id",
     )
     .bind(task_id)
@@ -1169,7 +1184,8 @@ async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &
     // (claim_id, actor_id, claimed_at, expires_at)
     let mut active: Option<(String, String, DateTime<Utc>, DateTime<Utc>)> = None;
     let mut folded_out: Vec<(String, ReleaseReason)> = Vec::new();
-    let mut submitted = false;
+    let mut status = TaskStatus::Queue;
+    let mut status_at: Option<DateTime<Utc>> = None;
 
     for (kind, actor_id, at, payload) in rows {
         let payload: serde_json::Value =
@@ -1177,15 +1193,16 @@ async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &
         let claim_id = payload["claim_id"].as_str().unwrap_or("").to_string();
         match kind.as_str() {
             "task.claimed" => {
-                if active.is_none() {
+                if active.is_none() && status == TaskStatus::Queue {
                     let exp: Option<DateTime<Utc>> =
                         serde_json::from_value(payload["expires_at"].clone()).ok();
                     if let Some(exp) = exp.filter(|e| *e > now) {
                         active = Some((claim_id, actor_id, at, exp));
+                        (status, status_at) = (TaskStatus::Work, Some(at));
                     }
                     // An already-expired claim never activates (lazy-sweep parity).
                 }
-                // An active claim already exists: this one is ineffective (D8).
+                // Task already claimed or past `queue`: ineffective (D8).
             }
             "claim.released" | "claim.force_released" | "task.submitted" => {
                 if let Some((cid, _, _, _)) = &active {
@@ -1196,10 +1213,21 @@ async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &
                             _ => ReleaseReason::Released,
                         };
                         folded_out.push((cid.clone(), reason));
-                        submitted |= kind == "task.submitted";
+                        status = if kind == "task.submitted" {
+                            TaskStatus::Review
+                        } else {
+                            TaskStatus::Queue
+                        };
+                        status_at = Some(at);
                         active = None;
                     }
                 }
+            }
+            "task.approved" if status == TaskStatus::Review => {
+                (status, status_at) = (TaskStatus::Done, Some(at));
+            }
+            "task.changes_requested" if status == TaskStatus::Review => {
+                (status, status_at) = (TaskStatus::Queue, Some(at));
             }
             _ => {}
         }
@@ -1225,58 +1253,38 @@ async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &
         .execute(&mut **tx)
         .await?;
     }
-    match active {
-        Some((cid, actor_id, claimed_at, expires_at)) => {
-            // The fold winner owns the lock: materialize its claim row on this
-            // replica (it may have been decided by an event received here).
-            sqlx::query(
-                "INSERT OR IGNORE INTO claims (id, task_id, actor_id, claimed_at, expires_at)
-                 VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(&cid)
-            .bind(task_id)
-            .bind(actor_id)
-            .bind(claimed_at)
-            .bind(expires_at)
-            .execute(&mut **tx)
-            .await?;
-            // Any other still-active claim is a fold loser (D8).
-            sqlx::query(
-                "UPDATE claims SET released_at = ?, release_reason = 'released'
-                 WHERE task_id = ? AND released_at IS NULL AND id != ?",
-            )
-            .bind(now)
-            .bind(task_id)
-            .bind(cid)
-            .execute(&mut **tx)
-            .await?;
-            sqlx::query(
-                "UPDATE tasks SET status = 'work', updated_at = ? WHERE id = ? AND status = 'queue'",
-            )
-            .bind(now)
-            .bind(task_id)
-            .execute(&mut **tx)
-            .await?;
-        }
-        None => {
-            sqlx::query(
-                "UPDATE tasks SET status = 'queue', updated_at = ? WHERE id = ? AND status = 'work'",
-            )
-            .bind(now)
-            .bind(task_id)
-            .execute(&mut **tx)
-            .await?;
-        }
-    }
-    if submitted {
+    if let Some((cid, actor_id, claimed_at, expires_at)) = active {
+        // The fold winner owns the lock: materialize its claim row on this
+        // replica (it may have been decided by an event received here).
         sqlx::query(
-            "UPDATE tasks SET status = 'review', updated_at = ?
-             WHERE id = ? AND status IN ('work', 'queue')",
+            "INSERT OR IGNORE INTO claims (id, task_id, actor_id, claimed_at, expires_at)
+                 VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&cid)
+        .bind(task_id)
+        .bind(actor_id)
+        .bind(claimed_at)
+        .bind(expires_at)
+        .execute(&mut **tx)
+        .await?;
+        // Any other still-active claim is a fold loser (D8).
+        sqlx::query(
+            "UPDATE claims SET released_at = ?, release_reason = 'released'
+                 WHERE task_id = ? AND released_at IS NULL AND id != ?",
         )
         .bind(now)
         .bind(task_id)
+        .bind(cid)
         .execute(&mut **tx)
         .await?;
     }
+    // The event that decided the status stamps it, so replicas agree on
+    // `updated_at` as well.
+    sqlx::query("UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3 AND status != ?1")
+        .bind(status)
+        .bind(status_at.unwrap_or(now))
+        .bind(task_id)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }

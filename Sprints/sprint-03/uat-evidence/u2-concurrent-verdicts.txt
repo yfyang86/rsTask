@@ -1,0 +1,5 @@
+# U2 — disconnected reviewers converge
+before sync  A: done  B: queue
+after sync   A: done  B: done
+A log: ["task.created","task.claimed","task.submitted","task.approved","task.changes_requested"]
+B log: ["task.created","task.claimed","task.submitted","task.approved","task.changes_requested"]

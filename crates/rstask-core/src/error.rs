@@ -21,6 +21,9 @@ pub enum Error {
         to: String,
     },
 
+    #[error("actor {actor} is not permitted to {action}")]
+    NotPermitted { actor: String, action: String },
+
     #[error("claim expired for task {0}")]
     ClaimExpired(String),
 
