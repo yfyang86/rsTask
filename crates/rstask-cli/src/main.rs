@@ -17,6 +17,11 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
+    /// Directory of actor secret keys (flag > RSTASK_AUTH_KEY_DIR > config >
+    /// `keys/` beside the database).
+    #[arg(long, global = true)]
+    keys: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -67,6 +72,10 @@ enum ActorCommand {
         /// Limit the actor to these roles (repeatable); none given means all.
         #[arg(long = "role", value_enum)]
         roles: Vec<RoleArg>,
+        /// The human provisioning this actor (default: the workspace root).
+        /// Their key must be in the key directory.
+        #[arg(long)]
+        by: Option<String>,
     },
     Heartbeat {
         id: String,
@@ -167,6 +176,16 @@ enum TaskCommand {
         id: String,
         #[arg(long)]
         actor: String,
+        /// The submission you reviewed (`submission.id` in `task show`):
+        /// refused if the task has been resubmitted since.
+        #[arg(long)]
+        submission: Option<String>,
+    },
+    /// From now on only a human's approval counts for this task. No way back.
+    Protect {
+        id: String,
+        #[arg(long)]
+        actor: String,
     },
     /// Review → queue (send back for rework).
     Reject {
@@ -213,14 +232,22 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cfg = Config::load(cli.config.as_deref())?;
     let db = cli.db.unwrap_or(cfg.storage.db_path);
-    let store = Store::open(&db).await?;
+    let store = match cli.keys.or(cfg.auth.key_dir) {
+        Some(keys) => Store::open_with_keys(&db, &keys).await?,
+        None => Store::open(&db).await?,
+    };
 
     match cli.command {
         Command::Init => {
             println!("initialized {}", db.display());
         }
         Command::Actor { command } => match command {
-            ActorCommand::New { name, kind, roles } => {
+            ActorCommand::New {
+                name,
+                kind,
+                roles,
+                by,
+            } => {
                 let kind = match kind {
                     KindArg::Human => ActorKind::Human,
                     KindArg::Agent => ActorKind::Agent,
@@ -233,7 +260,9 @@ async fn main() -> anyhow::Result<()> {
                         RoleArg::Reviewer => Role::Reviewer,
                     })
                     .collect();
-                let actor = store.create_actor_with_roles(kind, &name, &roles).await?;
+                let actor = store
+                    .provision_actor(kind, &name, &roles, by.as_deref())
+                    .await?;
                 println!("{}", serde_json::to_string_pretty(&actor)?);
             }
             ActorCommand::Heartbeat { id } => {
@@ -305,8 +334,16 @@ async fn main() -> anyhow::Result<()> {
                 let task = store.submit_for_review(&id, &actor, &submission).await?;
                 println!("{}", serde_json::to_string_pretty(&task)?);
             }
-            TaskCommand::Approve { id, actor } => {
-                let task = store.approve(&id, &actor).await?;
+            TaskCommand::Approve {
+                id,
+                actor,
+                submission,
+            } => {
+                let task = store.approve(&id, &actor, submission.as_deref()).await?;
+                println!("{}", serde_json::to_string_pretty(&task)?);
+            }
+            TaskCommand::Protect { id, actor } => {
+                let task = store.protect_task(&id, &actor).await?;
                 println!("{}", serde_json::to_string_pretty(&task)?);
             }
             TaskCommand::Reject { id, actor, reason } => {

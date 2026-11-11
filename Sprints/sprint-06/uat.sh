@@ -36,8 +36,8 @@ names() { sed "${SED[@]}" -E -e 's/[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}/<id
   r task block "$DEPLOY" --by "$BUILD" --actor "$ALICE"
   echo "claim_next -> $(next "$BOT")"
   echo "\$ A: task claim deploy"; r task claim "$DEPLOY" --actor "$BOT" 2>&1 | head -1
+  BOB=$(r actor new bob --kind agent | id); name "$BOB" bob
   b init >/dev/null; r sync export | b sync import >/dev/null
-  BOB=$(b actor new bob --kind agent | id); name "$BOB" bob
   echo "\$ B (imported the bundle): task claim deploy"; b task claim "$DEPLOY" --actor "$BOB" 2>&1 | head -1
   echo "task show deploy -> $(r task show "$DEPLOY" | jq -c '{status, priority, blocked_by, waiting_on}')"
   finish "$BUILD" "$BOT"
@@ -88,8 +88,9 @@ names() { sed "${SED[@]}" -E -e 's/[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}/<id
   done
   T=$(mcp "$WORKER" tasks_list '{"status":"work"}' | jq -r '.[0].id')
   mcp "$WORKER" task_complete "{\"id\":\"$T\",\"summary\":\"done\"}" >/dev/null
+  SUB=$(r task show "$T" | jq -r .submission.id)
   for who in PLANNER WORKER REVIEWER; do
-    echo "${who,,} task_approve -> $(mcp "${!who}" task_approve "{\"id\":\"$T\"}" | jq -r '"approved, status " + .status' 2>/dev/null || mcp "${!who}" task_approve "{\"id\":\"$T\"}" | short)"
+    echo "${who,,} task_approve -> $(mcp "${!who}" task_approve "{\"id\":\"$T\",\"submission\":\"$SUB\"}" | jq -r '"approved, status " + .status' 2>/dev/null || mcp "${!who}" task_approve "{\"id\":\"$T\",\"submission\":\"$SUB\"}" | short)"
   done
   echo "actor created without --role: $(r actor new jack --kind agent | jq -c .roles)"
 } >"$W/raw" 2>&1; names <"$W/raw" >"$EV/u4-roles.txt"

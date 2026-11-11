@@ -63,7 +63,7 @@ names() { sed -e "s/$ALICE/alice/g" -e "s/$BOT/bot/g" -e "s/$REVIEWER/reviewer/g
   mcp "$REVIEWER" task_reject "{\"id\":\"$T\",\"reason\":\"add a test\"}" >/dev/null
   echo "bot claim_next again -> $(mcp "$BOT" claim_next | jq -c '{title, rejection: (.rejection | del(.at))}')"
   mcp "$BOT" task_complete "{\"id\":\"$T\",\"summary\":\"added the test\"}" >/dev/null
-  echo "reviewer task_approve -> $(mcp "$REVIEWER" task_approve "{\"id\":\"$T\"}" | jq -r .status)"
+  echo "reviewer task_approve -> $(mcp "$REVIEWER" task_approve "{\"id\":\"$T\",\"submission\":\"$(r task show "$T" | jq -r .submission.id)\"}" | jq -r .status)"
   echo "log: $(kinds "$T")"
 } 2>&1 | names >"$EV/u3-worker-reviewer-loop.txt"
 
@@ -74,7 +74,7 @@ names() { sed -e "s/$ALICE/alice/g" -e "s/$BOT/bot/g" -e "s/$REVIEWER/reviewer/g
   echo "reviewer task_complete -> $(mcp "$REVIEWER" task_complete "{\"id\":\"$T\",\"summary\":\"mine\"}")"
   echo "reviewer task_release  -> $(mcp "$REVIEWER" task_release "{\"id\":\"$T\"}")"
   mcp "$BOT" task_complete "{\"id\":\"$T\",\"summary\":\"done\"}" >/dev/null
-  echo "bot task_approve (own) -> $(mcp "$BOT" task_approve "{\"id\":\"$T\"}")"
+  echo "bot task_approve (own) -> $(mcp "$BOT" task_approve "{\"id\":\"$T\",\"submission\":\"$(r task show "$T" | jq -r .submission.id)\"}")"
   echo "log: $(kinds "$T")"
 } 2>&1 | names >"$EV/u4-gate-over-mcp.txt"
 

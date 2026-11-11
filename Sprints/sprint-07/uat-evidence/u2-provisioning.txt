@@ -1,0 +1,11 @@
+# U2 — actors are provisioned by a human, starting from one root
+$ (fresh workspace) actor new bot --kind agent
+Error: actor bot is not permitted to be the first actor: the workspace root must be human
+$ actor new minion --by bot            (bot's key directory)
+Error: actor bot is not permitted to provision actors (humans only)
+$ actor new minion                     (bot's key directory)
+Error: no signing key for actor alice in this key directory
+$ actor new carol --kind human         (alice's key directory)
+{"kind":"actor.created","signed_by":"alice","payload":{"kind":"human","name":"carol","roles":["planner","worker","reviewer"]}}
+$ import a bundle from a workspace rooted at mallory
+{"added":0,"rejected":1,"reasons":["a different workspace: this one already has its root"]}

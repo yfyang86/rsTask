@@ -6,6 +6,7 @@
 pub mod config;
 pub mod error;
 pub mod event;
+mod keys;
 pub mod models;
 pub mod store;
 pub mod sync;
@@ -18,4 +19,4 @@ pub use models::{
     Submitted, Task, TaskDetail, TaskStatus,
 };
 pub use store::Store;
-pub use sync::{ActorRow, Bucket, Merge, SyncBundle};
+pub use sync::{Bucket, Merge, SyncBundle};

@@ -31,7 +31,7 @@ names() { sed -e "s/$ALICE/alice/g" -e "s/$BOT2/bot2/g" -e "s/$BOT/bot/g" -e "s/
 { echo "# U2 — disconnected reviewers converge"
   T=$(a task new "u2 contested" --actor "$ALICE" | id)
   a task claim "$T" --actor "$BOT" >/dev/null; a task submit "$T" --actor "$BOT" >/dev/null
-  sync_ab; CAROL=$(b actor new carol --kind human | id)
+  CAROL=$(a actor new carol --kind human | id); sync_ab
   a task approve "$T" --actor "$ALICE" >/dev/null; b task reject "$T" --actor "$CAROL" --reason rework >/dev/null
   echo "before sync  A: $(status a "$T")  B: $(status b "$T")"
   sync_ab; sync_ba

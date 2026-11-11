@@ -21,8 +21,8 @@ Confirmed by probing the CLI on two replicas unless marked *(read)*.
 | A2 | Self-approval not blocked (walkthrough F2): `approve()` checked neither actor kind nor the submitter. | fixed, sprint 03 |
 | A3 | A human could not force-release another actor's claim: `release_claim` only looked up the caller's own claim. | fixed, sprint 03 |
 | A4 | Claims cannot be kept alive: `renew_claim` has no CLI command and writes no event; `actor heartbeat` updates a column nothing reads. *(read)* | fixed, sprint 04 (the heartbeat column stays unused) |
-| A5 | Merge checks signatures, not authority: any known actor's event is applied (release another's claim by naming its id, approve anything). *(read)* | sprint 07 |
-| A6 | Identity is honour-system: `--actor` is a bare id, secret keys are plaintext in the shared DB, any process can run `actor new --kind human`. *(read)* | sprint 07 |
+| A5 | Merge checks signatures, not authority: any known actor's event is applied (release another's claim by naming its id, approve anything). *(read)* | fixed, sprint 07 |
+| A6 | Identity is honour-system: `--actor` is a bare id, secret keys are plaintext in the shared DB, any process can run `actor new --kind human`. *(read)* | fixed, sprint 07 (see Trust boundary) |
 | A7 | Smaller: `update_task` has no claim/existence check and no CLI command; the active-claim index is not `UNIQUE`; claim expiry is judged by the wall clock at merge time; concurrent `task.updated` is last-arrival-wins. *(read)* | `update_task` checks: sprint 05; expiry: sprint 04; rest backlog |
 | A8 | Found in sprint 05: write transactions that read before writing were refused with `database is locked` whenever another writer committed in between (reviewers approving while workers claim). | fixed, sprint 05 (`BEGIN IMMEDIATE`) |
 
@@ -53,11 +53,24 @@ Agents must not review each other unattended until these hold.
 
 | # | Precondition |
 |---|--------------|
-| R1 | Keys leave the workspace DB: each agent holds only its own key; humans' keys are out of agents' reach. |
-| R2 | Authority is enforced in the fold (G2, G3, claim ownership on release, roles, claims on blocked tasks), not only on the local write path. |
-| R3 | Actor provisioning is signed by a human root key instead of trust-on-first-use. |
-| R4 | Evidence-bound approval: `task.approved` references the hash of the submitted evidence (M2). |
-| R5 | A protected task class — changes to the gate, the keys or the fold rules — always needs human sign-off. |
+| R1 | Keys leave the workspace DB. Secret keys live in a key directory, one `<actor id>.key` each (`--keys`, `RSTASK_AUTH_KEY_DIR`, `auth.key_dir`; default `keys/` beside the database); the database holds public keys only. An agent started with a directory holding only its own key cannot sign as anyone else. |
+| R2 | Authority is enforced on merge, not only on the local write path. Refused before entering the log: an event from an unknown actor or with the wrong key, a Lamport clock that does not follow its parents, a kind its author's role or kind does not allow (planner / worker / reviewer; force-release and provisioning: humans). Ineffective in the fold: release, submit or edit by anyone but the holder; an agent approving its own submission (G2); an approval that names another submission (R4); an agent's approval of a protected task (R5). Not enforced: a claim on a task that a dependency blocks — a replica that had not heard of the dependency made an honest concurrent edit. |
+| R3 | Actors are created by signed `actor.created` events. The first event of a workspace is its root: a self-signed human. Every other actor is provisioned by a human (default: the root). A replica has one root; a bundle built on another root is refused whole. The actor directory no longer travels beside the events. |
+| R4 | Evidence-bound approval: `task.approved` names the `task.submitted` event it approves — an id that hashes the summary, refs and evidence. It counts only while that submission is the one in review; locally a reviewer may pass the id it read and is refused if the task was resubmitted since (MCP requires it). |
+| R5 | Protected tasks: `task.protected` (a planner, irreversible) marks a task so that only a human's approval counts. Marking is a planning decision — nothing detects which tasks touch the gate. |
+
+## Trust boundary (after sprint 07)
+
+What holds: a replica accepts only events signed by actors its root's chain of humans
+provisioned, each acting within its kind and roles, and derives every task's state
+from those events — so no actor can approve its own work, act on another's claim or
+mint an identity on *someone else's* replica.
+
+What does not: a process that can write a replica's SQLite file can corrupt *that*
+replica's derived tables (other replicas are unaffected and will not accept the
+result). Key files are plaintext on disk (`0600`). There is no key rotation or
+revocation; losing the root key ends provisioning. Agents that must not trust each
+other need their own replica and key directory, not just their own MCP server.
 
 ## Sprints
 
@@ -69,7 +82,7 @@ Agents must not review each other unattended until these hold.
 | 04 | Claim liveness and handoff: M1, M2 | done |
 | 05 | MCP server with `claim_next`: M3 | done |
 | 06 | Dependencies and roles: M4, M5 | done |
-| 07 | Keys and authority: R1–R5, A5, A6 | planned |
+| 07 | Keys and authority: R1–R5, A5, A6 | done |
 
 ## Deferred (unchanged from v2)
 

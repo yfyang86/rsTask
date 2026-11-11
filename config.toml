@@ -7,6 +7,7 @@ cors_origins = ["http://localhost:3000"]
 [auth]
 mode = "offline"           # offline | oidc
 key_algorithm = "ed25519"  # default; RSA only for legacy
+# key_dir = ".rstask/keys" # actor secret keys; default: keys/ beside the database
 
 [storage]
 db_path = ".rstask/rstask.sqlite"

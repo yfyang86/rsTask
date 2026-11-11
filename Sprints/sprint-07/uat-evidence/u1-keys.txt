@@ -1,0 +1,8 @@
+# U1 — keys live outside the workspace database
+key directory: alice.key bot.key 
+database files holding alice's secret (raw bytes or hex text): 0 + 0
+database files holding bot's secret (raw bytes or hex text): 0 + 0
+bot's key moved to its own directory; the server is started with --keys <that directory>
+as bot:   task_create -> created "made by bot"
+as alice: task_create -> ERROR: no signing key for actor alice in this key directory
+as alice: task_approve -> ERROR: no signing key for actor alice in this key directory

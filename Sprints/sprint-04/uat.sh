@@ -17,7 +17,7 @@ sync_ba() { b sync export | a sync import >/dev/null; }
 ALICE=$(a actor new alice --kind human | id)
 BOT=$(a actor new bot --kind agent | id)
 b init >/dev/null; sync_ab
-RIVAL=$(b actor new rival --kind agent | id); sync_ba
+RIVAL=$(a actor new rival --kind agent | id); sync_ab
 names() { sed -e "s/$ALICE/alice/g" -e "s/$BOT/bot/g" -e "s/$RIVAL/rival/g" \
   -E -e 's/[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}/<id>/g'; }
 

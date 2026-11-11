@@ -139,6 +139,8 @@ pub struct Task {
     pub updated_at: DateTime<Utc>,
     /// Set on subtasks; a parent waits for its subtasks.
     pub parent_id: Option<String>,
+    /// Only a human's approval counts (PRD-v3 R5).
+    pub protected: bool,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
@@ -166,6 +168,8 @@ pub struct Submission {
 /// The latest `task.submitted` on a task.
 #[derive(Debug, Clone, Serialize)]
 pub struct Submitted {
+    /// Id of the `task.submitted` event: what an approval must name (R4).
+    pub id: String,
     pub by: String,
     pub at: DateTime<Utc>,
     #[serde(flatten)]

@@ -149,6 +149,7 @@ async fn agents_work_and_review_over_mcp() {
             "task_complete",
             "task_create",
             "task_get",
+            "task_protect",
             "task_reject",
             "task_release",
             "task_renew",
@@ -189,8 +190,13 @@ async fn agents_work_and_review_over_mcp() {
         json!({ "id": task.id, "summary": "did it", "refs": ["abc123"], "evidence": "green" }),
     )
     .unwrap();
+    let submitted = bot.call("task_get", json!({ "id": task.id })).unwrap();
+    let first = submitted["submission"]["id"].clone();
     let err = bot
-        .call("task_approve", json!({ "id": task.id }))
+        .call(
+            "task_approve",
+            json!({ "id": task.id, "submission": first }),
+        )
         .unwrap_err();
     assert!(err.contains("own submission"), "{err}");
 
@@ -216,8 +222,21 @@ async fn agents_work_and_review_over_mcp() {
         json!({ "id": task.id, "summary": "added the test" }),
     )
     .unwrap();
+    // An approval names what was reviewed: the first submission is stale now.
+    let err = reviewer
+        .call(
+            "task_approve",
+            json!({ "id": task.id, "submission": first }),
+        )
+        .unwrap_err();
+    assert!(err.contains("resubmitted"), "{err}");
+    let second =
+        reviewer.call("task_get", json!({ "id": task.id })).unwrap()["submission"]["id"].clone();
     let done = reviewer
-        .call("task_approve", json!({ "id": task.id }))
+        .call(
+            "task_approve",
+            json!({ "id": task.id, "submission": second }),
+        )
         .unwrap();
     assert_eq!(done["status"], "done");
 

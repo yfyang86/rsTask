@@ -45,8 +45,20 @@ pub enum Error {
     #[error("invalid event {id}: {reason}")]
     InvalidEvent { id: String, reason: String },
 
-    #[error("actor {0} has no signing key (pre-sync actor or learned from a peer)")]
+    #[error("no signing key for actor {0} in this key directory")]
     NoSigningKey(String),
+
+    #[error("key does not belong to actor {0}")]
+    KeyMismatch(String),
+
+    #[error(
+        "task {task} was resubmitted: you reviewed {reviewed}, the current submission is {current}"
+    )]
+    StaleApproval {
+        task: String,
+        reviewed: String,
+        current: String,
+    },
 
     #[error("invalid sync bundle: {0}")]
     InvalidBundle(String),

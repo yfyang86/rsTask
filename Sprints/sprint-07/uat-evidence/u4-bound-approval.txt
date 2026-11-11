@@ -1,0 +1,10 @@
+# U4 — an approval is bound to the submission that was reviewed
+B: rev reads the task: submission {"id":"S1","summary":"first try"}
+A: alice rejects; worker resubmits: submission {"id":"S2","summary":"second try"}
+B: rev, busy elsewhere meanwhile, approves S1
+before sync  A: review  B: done
+after sync   A: review  B: review
+$ A: task approve --submission S1
+Error: task <id> was resubmitted: you reviewed S1, the current submission is S2
+$ A: task approve --submission S2 -> done
+approvals in the log: [{"by":"rev","submission":"S1"},{"by":"alice","submission":"S2"}]

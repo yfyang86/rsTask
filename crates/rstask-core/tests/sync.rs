@@ -16,6 +16,18 @@ async fn exchange(a: &Store, b: &Store) {
         .unwrap();
 }
 
+/// An actor provisioned on `a` (signed by its root) whose key is then
+/// carried to `b`'s key directory — how an actor comes to work on a second
+/// replica (PRD-v3 R1, R3).
+async fn provision(a: &Store, b: &Store, kind: ActorKind, name: &str) -> rstask_core::Actor {
+    let actor = a.create_actor(kind, name).await.unwrap();
+    exchange(a, b).await;
+    b.import_key(&actor.id, &a.export_key(&actor.id).unwrap())
+        .await
+        .unwrap();
+    actor
+}
+
 async fn boards_equal(a: &Store, b: &Store) -> bool {
     let ba = a.board_state().await.unwrap();
     let bb = b.board_state().await.unwrap();
@@ -69,6 +81,7 @@ async fn u2_two_way_convergence_and_idempotent_resync() {
     let task = a.create_task("shared", "", &alice.id).await.unwrap();
 
     let b = store().await;
+    let bob = provision(&a, &b, ActorKind::Agent, "bob").await;
     exchange(&a, &b).await;
     exchange(&b, &a).await; // common history
 
@@ -79,9 +92,8 @@ async fn u2_two_way_convergence_and_idempotent_resync() {
     a.submit_for_review(&task.id, &alice.id, &Submission::default())
         .await
         .unwrap();
-    a.approve(&task.id, &alice.id).await.unwrap();
+    a.approve(&task.id, &alice.id, None).await.unwrap();
 
-    let bob = b.create_actor(ActorKind::Agent, "bob").await.unwrap();
     b.create_task("from b", "", &bob.id).await.unwrap();
 
     exchange(&a, &b).await;
@@ -114,11 +126,11 @@ async fn u3_concurrent_claims_pick_same_winner() {
     let task = a.create_task("contested", "", &alice.id).await.unwrap();
 
     let b = store().await;
+    let y = provision(&a, &b, ActorKind::Agent, "y").await;
     exchange(&a, &b).await;
     exchange(&b, &a).await; // identical history, identical heads
 
     let x = a.create_actor(ActorKind::Agent, "x").await.unwrap();
-    let y = b.create_actor(ActorKind::Agent, "y").await.unwrap();
 
     // Both sides claim the same task while disconnected.
     a.claim_task(&task.id, &x.id, Duration::from_secs(900))
@@ -167,7 +179,7 @@ async fn u4_shuffled_delivery_parks_and_drains() {
     a.submit_for_review(&task.id, &alice.id, &Submission::default())
         .await
         .unwrap();
-    a.approve(&task.id, &alice.id).await.unwrap();
+    a.approve(&task.id, &alice.id, None).await.unwrap();
 
     let b = store().await;
     // Reverse the event order in the bundle.
@@ -221,18 +233,18 @@ async fn merge_survives_partial_parents_then_catches_up() {
     let _t2 = a.create_task("two", "", &alice.id).await.unwrap();
 
     let b = store().await;
-    // B receives only the second event (missing its parent) — as a fragment
+    // B receives the second task event without its parent — as a fragment
     // cut from a bigger bundle.
     let bundle = a.export_bundle().await.unwrap();
     let mut fragment = bundle.clone();
-    fragment.events.remove(0);
+    fragment.events.remove(1); // [root actor, task one, task two]
     let m = b.receive_bundle(&fragment).await.unwrap();
     assert!(m.pending > 0, "parent-missing event parked: {m:?}");
     assert_eq!(b.pending_count().await.unwrap(), 1);
 
     // The parent arrives later; the park drains and applies.
     let mut rest = bundle;
-    rest.events.truncate(1);
+    rest.events = vec![rest.events.remove(1)];
     let m = b.receive_bundle(&rest).await.unwrap();
     assert_eq!(b.pending_count().await.unwrap(), 0);
     let _ = t1;
@@ -294,11 +306,11 @@ async fn s03_u2_concurrent_approve_and_reject_converge() {
         .unwrap();
 
     let b = store().await;
+    let carol = provision(&a, &b, ActorKind::Human, "carol").await;
     exchange(&a, &b).await;
-    let carol = b.create_actor(ActorKind::Human, "carol").await.unwrap();
 
     // Disconnected reviewers disagree.
-    a.approve(&task.id, &alice.id).await.unwrap();
+    a.approve(&task.id, &alice.id, None).await.unwrap();
     b.request_changes(&task.id, &carol.id, "rework")
         .await
         .unwrap();
@@ -351,8 +363,8 @@ async fn s04_u1_renewed_claim_holds_on_every_replica() {
         .unwrap();
 
     let b = store().await;
+    let rival = provision(&a, &b, ActorKind::Agent, "rival").await;
     exchange(&a, &b).await;
-    let rival = b.create_actor(ActorKind::Agent, "rival").await.unwrap();
 
     // The holder renews on A; B does not hear about it before the original
     // TTL runs out, so a rival there takes the task in good faith.
@@ -437,8 +449,8 @@ async fn s06_links_and_roles_replicate() {
         .unwrap();
 
     let b = store().await;
+    let bob = provision(&a, &b, ActorKind::Agent, "bob").await;
     exchange(&a, &b).await;
-    let bob = b.create_actor(ActorKind::Agent, "bob").await.unwrap();
 
     assert!(boards_equal(&a, &b).await, "parent_id rides on the board");
     let d = b.task_detail(&deploy.id).await.unwrap();
@@ -472,8 +484,8 @@ async fn s06_concurrent_dependency_edits_converge() {
     let y = a.create_task("y", "", &alice.id).await.unwrap();
     a.add_dependency(&t.id, &x.id, &alice.id).await.unwrap();
     let b = store().await;
+    let carol = provision(&a, &b, ActorKind::Human, "carol").await;
     exchange(&a, &b).await;
-    let carol = b.create_actor(ActorKind::Human, "carol").await.unwrap();
 
     // Disconnected planners edit the same task's dependencies.
     a.remove_dependency(&t.id, &x.id, &alice.id).await.unwrap();

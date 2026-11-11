@@ -92,7 +92,7 @@ async fn workflow_gate_enforced() {
     let agent = store.create_actor(ActorKind::Agent, "bot").await.unwrap();
 
     // Cannot approve directly from queue.
-    let err = store.approve(&task.id, &alice).await.unwrap_err();
+    let err = store.approve(&task.id, &alice, None).await.unwrap_err();
     assert!(matches!(err, Error::InvalidTransition { .. }));
 
     // Cannot submit without claiming first (queue → review is illegal).
@@ -116,7 +116,7 @@ async fn workflow_gate_enforced() {
         TaskStatus::Review
     );
 
-    store.approve(&task.id, &alice).await.unwrap();
+    store.approve(&task.id, &alice, None).await.unwrap();
     assert_eq!(
         store.get_task(&task.id).await.unwrap().status,
         TaskStatus::Done
@@ -242,7 +242,7 @@ async fn agent_cannot_approve_own_submission() {
         .await
         .unwrap();
 
-    let err = store.approve(&task.id, &bot.id).await.unwrap_err();
+    let err = store.approve(&task.id, &bot.id, None).await.unwrap_err();
     assert!(matches!(err, Error::NotPermitted { .. }), "got {err:?}");
     assert_eq!(
         store.get_task(&task.id).await.unwrap().status,
@@ -253,7 +253,7 @@ async fn agent_cannot_approve_own_submission() {
     assert!(!events.iter().any(|e| e.kind == "task.approved"));
 
     // A different agent may review it.
-    store.approve(&task.id, &peer.id).await.unwrap();
+    store.approve(&task.id, &peer.id, None).await.unwrap();
     assert_eq!(
         store.get_task(&task.id).await.unwrap().status,
         TaskStatus::Done
@@ -622,7 +622,7 @@ async fn concurrent_writers_never_see_a_locked_database() {
     for id in in_review {
         let (s, alice, bot) = (store.clone(), alice.id.clone(), bot.id.clone());
         handles.push(tokio::spawn(async move {
-            s.approve(&id, &alice).await.map(|_| ())
+            s.approve(&id, &alice, None).await.map(|_| ())
         }));
         let s = store.clone();
         handles.push(tokio::spawn(async move {
@@ -650,7 +650,7 @@ async fn finish(store: &Store, task_id: &str, worker: &str, reviewer: &str) {
         .submit_for_review(task_id, worker, &Submission::default())
         .await
         .unwrap();
-    store.approve(task_id, reviewer).await.unwrap();
+    store.approve(task_id, reviewer, None).await.unwrap();
 }
 
 #[tokio::test]
@@ -818,14 +818,14 @@ async fn roles_gate_planning_working_and_reviewing() {
         .unwrap();
 
     // Reviewing.
-    denied(store.approve(&task.id, worker).await.map(|_| ()));
+    denied(store.approve(&task.id, worker, None).await.map(|_| ()));
     denied(
         store
             .request_changes(&task.id, planner, "no")
             .await
             .map(|_| ()),
     );
-    store.approve(&task.id, reviewer).await.unwrap();
+    store.approve(&task.id, reviewer, None).await.unwrap();
 
     // No roles given: every role (alice and the README quick start).
     assert_eq!(store.get_actor(&alice).await.unwrap().roles.0.len(), 3);

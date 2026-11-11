@@ -30,6 +30,12 @@ struct Cli {
     /// Path to config.toml.
     #[arg(long)]
     config: Option<PathBuf>,
+
+    /// Directory holding this actor's secret key (flag > RSTASK_AUTH_KEY_DIR >
+    /// config > `keys/` beside the database). Give each agent a directory
+    /// with only its own key.
+    #[arg(long)]
+    keys: Option<PathBuf>,
 }
 
 /// Default claim TTL, as in the CLI: 15 min.
@@ -118,6 +124,14 @@ struct CompleteArgs {
     refs: Option<Vec<String>>,
     /// Proof it works: test output, as Markdown.
     evidence: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ApproveArgs {
+    /// Task id.
+    id: String,
+    /// `submission.id` from task_get: the submission you reviewed.
+    submission: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -299,10 +313,21 @@ impl Server {
     }
 
     #[tool(
-        description = "Approve a task in review (review -> done). You cannot approve your own submission."
+        description = "Approve a task in review (review -> done), naming the submission you reviewed (submission.id from task_get). Refused if it was resubmitted since, if it is your own submission, or if the task is protected (humans only)."
     )]
-    async fn task_approve(&self, Parameters(a): Parameters<IdArgs>) -> CallToolResult {
-        reply(self.store.approve(&a.id, self.me()).await)
+    async fn task_approve(&self, Parameters(a): Parameters<ApproveArgs>) -> CallToolResult {
+        reply(
+            self.store
+                .approve(&a.id, self.me(), Some(&a.submission))
+                .await,
+        )
+    }
+
+    #[tool(
+        description = "Mark a task protected: from then on only a human's approval counts. Cannot be undone."
+    )]
+    async fn task_protect(&self, Parameters(a): Parameters<IdArgs>) -> CallToolResult {
+        reply(self.store.protect_task(&a.id, self.me()).await)
     }
 
     #[tool(description = "Send a task in review back to the queue, with the reason.")]
@@ -325,7 +350,7 @@ impl ServerHandler for Server {
             ))
             .with_instructions(format!(
                 "RsTask workspace. You act as {:?} actor \"{}\" ({}), roles: {}. \
-                 Planner: task_create (parent for subtasks), task_block, task_update. \
+                 Planner: task_create (parent for subtasks), task_block, task_update, task_protect. \
                  Worker: claim_next -> task_renew while working -> task_complete. \
                  Reviewer: tasks_list status=review -> task_get -> task_approve or task_reject.",
                 self.actor.kind, self.actor.name, self.actor.id, self.actor.roles
@@ -341,7 +366,11 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("RSTASK_ACTOR").ok())
         .ok_or_else(|| anyhow::anyhow!("no actor: pass --actor <id> or set RSTASK_ACTOR"))?;
     let cfg = Config::load(cli.config.as_deref())?;
-    let store = Store::open(&cli.db.unwrap_or(cfg.storage.db_path)).await?;
+    let db = cli.db.unwrap_or(cfg.storage.db_path);
+    let store = match cli.keys.or(cfg.auth.key_dir) {
+        Some(keys) => Store::open_with_keys(&db, &keys).await?,
+        None => Store::open(&db).await?,
+    };
     let actor = store.get_actor(&actor_id).await?;
 
     // stdout carries the protocol; anything for humans goes to stderr.

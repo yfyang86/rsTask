@@ -1,0 +1,13 @@
+# U3 — authority holds on merge (automated)
+test a_different_root_is_a_different_workspace ... ok
+test a_legacy_workspace_has_its_secrets_moved_out_and_scrubbed ... ok
+test a_protected_task_needs_a_human_approval ... ok
+test a_rewound_lamport_clock_is_refused ... ok
+test actors_are_provisioned_by_a_human_from_one_root ... ok
+test an_approval_counts_only_for_the_submission_it_names ... ok
+test concurrent_content_edits_converge ... ok
+test forged_self_approval_changes_nothing ... ok
+test only_the_holder_releases_or_submits_on_merge ... ok
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test roles_and_kind_are_checked_on_merge ... ok
+test secrets_live_in_the_key_directory_not_the_database ... ok

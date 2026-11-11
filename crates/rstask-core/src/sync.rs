@@ -1,15 +1,13 @@
 //! Sync bundles and set-reconciliation helpers (PRD-v2 D2).
 //!
 //! The wire/storage unit is [`SyncBundle`]: the postcard-encoded signed event
-//! DAG plus the actor directory (pubkeys only — never secrets). Sprint 02's
+//! DAG. Actors are part of it, as `actor.created` events. Sprint 02's
 //! network protocol carries the same bundle, bucket-diffed.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::event::EventId;
-use crate::models::{ActorKind, Roles};
 
 /// Lamport events per fingerprint bucket (sync step 1).
 pub const BUCKET: u64 = 256;
@@ -33,24 +31,12 @@ pub struct Merge {
     pub rejected_ids: Vec<String>,
 }
 
-/// Actor directory entry exchanged with bundles.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActorRow {
-    pub id: String,
-    pub kind: ActorKind,
-    pub name: String,
-    pub created_at: DateTime<Utc>,
-    pub pubkey: [u8; 32],
-    pub roles: Roles,
-}
-
 /// Full-state sync unit: `rstask sync export|import` today, the payload of the
 /// sprint-02 wire protocol tomorrow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncBundle {
     /// Each entry is a postcard-encoded `StoredEvent`.
     pub events: Vec<Vec<u8>>,
-    pub actors: Vec<ActorRow>,
 }
 
 pub fn encode_bundle(bundle: &SyncBundle) -> Vec<u8> {
@@ -116,17 +102,8 @@ mod tests {
     fn bundle_roundtrip() {
         let bundle = SyncBundle {
             events: vec![vec![1, 2, 3]],
-            actors: vec![ActorRow {
-                id: "a1".into(),
-                kind: ActorKind::Human,
-                name: "alice".into(),
-                created_at: Utc::now(),
-                pubkey: [7; 32],
-                roles: Roles(vec![]),
-            }],
         };
         let decoded = decode_bundle(&encode_bundle(&bundle)).unwrap();
         assert_eq!(decoded.events, bundle.events);
-        assert_eq!(decoded.actors.len(), 1);
     }
 }

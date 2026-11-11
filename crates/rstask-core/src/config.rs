@@ -32,6 +32,10 @@ pub struct AuthConfig {
     pub mode: String,
     /// `ed25519` (default); RSA only for legacy consumers.
     pub key_algorithm: String,
+    /// Directory of actor secret keys, one `<actor id>.key` each (PRD-v3 R1).
+    /// Default: `keys/` beside the database. Point each agent at a directory
+    /// holding only its own key.
+    pub key_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +67,7 @@ impl Default for AuthConfig {
         Self {
             mode: "offline".into(),
             key_algorithm: "ed25519".into(),
+            key_dir: None,
         }
     }
 }
@@ -114,6 +119,9 @@ impl Config {
             if let Ok(port) = v.parse() {
                 self.server.port = port;
             }
+        }
+        if let Ok(v) = std::env::var("RSTASK_AUTH_KEY_DIR") {
+            self.auth.key_dir = Some(PathBuf::from(v));
         }
         if let Ok(v) = std::env::var("RSTASK_SERVER_CORS_ORIGINS") {
             self.server.cors_origins = v.split(',').map(str::trim).map(String::from).collect();

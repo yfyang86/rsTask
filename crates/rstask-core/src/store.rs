@@ -20,16 +20,18 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::event::{EventId, Signable, StoredEvent};
+use crate::keys::Keyring;
 use crate::models::{
     Actor, ActorKind, Claim, Event, Rejected, ReleaseReason, Role, Roles, Submission, Submitted,
     Task, TaskDetail, TaskStatus,
 };
-use crate::sync::{ActorRow, Bucket, Merge, SyncBundle, BUCKET};
+use crate::sync::{Bucket, Merge, SyncBundle, BUCKET};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_dag.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_links_roles.sql");
-const SCHEMA_VERSION: i64 = 3;
+const MIGRATION_0004: &str = include_str!("../migrations/0004_protected.sql");
+const SCHEMA_VERSION: i64 = 4;
 
 /// Ordered, versioned migrations guarded by `PRAGMA user_version`, so reopening
 /// an existing database is a no-op (ALTER migrations are not idempotent).
@@ -46,6 +48,9 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     if version < 3 {
         sqlx::raw_sql(MIGRATION_0003).execute(pool).await?;
     }
+    if version < 4 {
+        sqlx::raw_sql(MIGRATION_0004).execute(pool).await?;
+    }
     if version != SCHEMA_VERSION {
         sqlx::raw_sql(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
             .execute(pool)
@@ -57,6 +62,8 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
 #[derive(Debug)]
 pub struct Store {
     pool: SqlitePool,
+    /// Actor secret keys: outside the database (PRD-v3 R1).
+    keys: Keyring,
     /// Keeps the shared in-memory database alive for `open_in_memory`.
     #[allow(dead_code)]
     keepalive: Option<SqliteConnection>,
@@ -64,7 +71,14 @@ pub struct Store {
 
 impl Store {
     /// Open (creating if needed) the SQLite database and run migrations.
+    /// Secret keys are read from `keys/` beside the database.
     pub async fn open(path: &Path) -> Result<Self> {
+        let key_dir = path.parent().unwrap_or(Path::new("")).join("keys");
+        Self::open_with_keys(path, &key_dir).await
+    }
+
+    /// Open the database with secret keys in `key_dir` (PRD-v3 R1).
+    pub async fn open_with_keys(path: &Path, key_dir: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
@@ -76,8 +90,33 @@ impl Store {
             .foreign_keys(true);
         let pool = SqlitePoolOptions::new().connect_with(options).await?;
         run_migrations(&pool).await?;
+        let keys = Keyring::Dir(key_dir.to_path_buf());
+        // Workspaces from before sprint 07 kept secrets in the database:
+        // move them out.
+        let legacy: Vec<(String, Vec<u8>)> =
+            sqlx::query_as("SELECT actor_id, secret FROM actor_keys WHERE secret IS NOT NULL")
+                .fetch_all(&pool)
+                .await?;
+        let scrub = !legacy.is_empty();
+        for (actor_id, secret) in legacy {
+            if let Ok(secret) = <[u8; 32]>::try_from(secret.as_slice()) {
+                keys.put(&actor_id, &secret)?;
+            }
+            sqlx::query("UPDATE actor_keys SET secret = NULL WHERE actor_id = ?")
+                .bind(&actor_id)
+                .execute(&pool)
+                .await?;
+        }
+        if scrub {
+            // NULLing a column leaves the old bytes in freed pages and in the
+            // write-ahead log: rewrite the file and empty the log.
+            sqlx::raw_sql("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")
+                .execute(&pool)
+                .await?;
+        }
         Ok(Self {
             pool,
+            keys,
             keepalive: None,
         })
     }
@@ -102,6 +141,7 @@ impl Store {
         run_migrations(&pool).await?;
         Ok(Self {
             pool,
+            keys: Keyring::Memory(Default::default()),
             keepalive: Some(keepalive),
         })
     }
@@ -120,9 +160,9 @@ impl Store {
 
     // ---------------------------------------------------------------- actors
 
-    /// An actor holding every role.
+    /// An actor holding every role, provisioned by the workspace root.
     pub async fn create_actor(&self, kind: ActorKind, name: &str) -> Result<Actor> {
-        self.create_actor_with_roles(kind, name, &Role::ALL).await
+        self.provision_actor(kind, name, &Role::ALL, None).await
     }
 
     /// An actor limited to `roles` (PRD-v3 M5); none given means all.
@@ -131,6 +171,21 @@ impl Store {
         kind: ActorKind,
         name: &str,
         roles: &[Role],
+    ) -> Result<Actor> {
+        self.provision_actor(kind, name, roles, None).await
+    }
+
+    /// Create an actor as a signed `actor.created` event (PRD-v3 R3). The
+    /// first actor of a workspace is its root: human and self-signed. Every
+    /// later actor is signed by a human — `by`, or the root when `None` —
+    /// whose key must be in this key directory. The new actor's key is
+    /// written there too.
+    pub async fn provision_actor(
+        &self,
+        kind: ActorKind,
+        name: &str,
+        roles: &[Role],
+        by: Option<&str>,
     ) -> Result<Actor> {
         let roles = Roles(if roles.is_empty() {
             Role::ALL.to_vec()
@@ -142,24 +197,71 @@ impl Store {
         });
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
-        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
-        sqlx::query(
-            "INSERT INTO actors (id, kind, name, created_at, roles) VALUES (?, ?, ?, ?, ?)",
+        let new_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let pubkey = new_key.verifying_key().to_bytes();
+
+        let mut tx = self.begin_write().await?;
+        let root: Option<String> = match root_actor_tx(&mut tx).await? {
+            Some(root) => Some(root),
+            // Workspaces from before sprint 07 have no root event: their
+            // oldest human stands in.
+            None => {
+                sqlx::query_scalar(
+                    "SELECT id FROM actors WHERE kind = 'human' ORDER BY created_at LIMIT 1",
+                )
+                .fetch_optional(&mut *tx)
+                .await?
+            }
+        };
+        let (signer, signer_key) = match by.map(str::to_string).or(root) {
+            None => {
+                if kind != ActorKind::Human {
+                    return Err(Error::NotPermitted {
+                        actor: name.to_string(),
+                        action: "be the first actor: the workspace root must be human".into(),
+                    });
+                }
+                (id.clone(), new_key.clone())
+            }
+            Some(signer) => {
+                let signer_kind: Option<ActorKind> =
+                    sqlx::query_scalar("SELECT kind FROM actors WHERE id = ?")
+                        .bind(&signer)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                match signer_kind {
+                    None => return Err(Error::ActorNotFound(signer)),
+                    Some(ActorKind::Human) => {}
+                    Some(ActorKind::Agent) => {
+                        return Err(Error::NotPermitted {
+                            actor: signer,
+                            action: "provision actors (humans only)".into(),
+                        });
+                    }
+                }
+                let key = self.keys.get(&signer)?;
+                (signer, key)
+            }
+        };
+
+        insert_actor_tx(&mut tx, &id, kind, name, &roles, &pubkey, now).await?;
+        self.append_event_tx(
+            &mut tx,
+            &signer_key,
+            &signer,
+            &id,
+            "actor.created",
+            json!({
+                "kind": kind,
+                "name": name,
+                "roles": roles,
+                "pubkey": hex::encode(pubkey),
+            }),
+            now,
         )
-        .bind(&id)
-        .bind(kind)
-        .bind(name)
-        .bind(now)
-        .bind(roles.to_string())
-        .execute(&self.pool)
         .await?;
-        // Interim plaintext keystore inside the workspace DB (PRD-v2 D5).
-        sqlx::query("INSERT INTO actor_keys (actor_id, pubkey, secret) VALUES (?, ?, ?)")
-            .bind(&id)
-            .bind(signing_key.verifying_key().to_bytes().to_vec())
-            .bind(signing_key.to_bytes().to_vec())
-            .execute(&self.pool)
-            .await?;
+        self.keys.put(&id, &new_key.to_bytes())?;
+        tx.commit().await?;
         Ok(Actor {
             id,
             kind,
@@ -168,6 +270,28 @@ impl Store {
             last_heartbeat_at: None,
             roles,
         })
+    }
+
+    /// The actor's secret key, to carry it to another key directory.
+    pub fn export_key(&self, actor_id: &str) -> Result<[u8; 32]> {
+        Ok(self.keys.get(actor_id)?.to_bytes())
+    }
+
+    /// Add an actor's secret key to this key directory; it must match the
+    /// public key the workspace knows the actor by.
+    pub async fn import_key(&self, actor_id: &str, secret: &[u8; 32]) -> Result<()> {
+        let known: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT pubkey FROM actor_keys WHERE actor_id = ?")
+                .bind(actor_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some(known) = known else {
+            return Err(Error::ActorNotFound(actor_id.to_string()));
+        };
+        if SigningKey::from_bytes(secret).verifying_key().to_bytes()[..] != known[..] {
+            return Err(Error::KeyMismatch(actor_id.to_string()));
+        }
+        self.keys.put(actor_id, secret)
     }
 
     /// `Ok` if the actor holds `role`; the error names the role it lacks.
@@ -181,19 +305,9 @@ impl Store {
         })
     }
 
-    /// The actor's Ed25519 signing key (local actors only).
+    /// The actor's Ed25519 signing key, if this key directory holds it.
     async fn signing_key(&self, actor_id: &str) -> Result<SigningKey> {
-        let row: Option<(Option<Vec<u8>>,)> =
-            sqlx::query_as("SELECT secret FROM actor_keys WHERE actor_id = ?")
-                .bind(actor_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        match row.and_then(|(s,)| s) {
-            Some(bytes) if bytes.len() == 32 => Ok(SigningKey::from_bytes(
-                bytes.as_slice().try_into().expect("len checked"),
-            )),
-            _ => Err(Error::NoSigningKey(actor_id.to_string())),
-        }
+        self.keys.get(actor_id)
     }
 
     pub async fn get_actor(&self, id: &str) -> Result<Actor> {
@@ -401,7 +515,8 @@ impl Store {
         let submission = self
             .latest_event(id, "task.submitted")
             .await?
-            .map(|(by, at, p)| Submitted {
+            .map(|(id, by, at, p)| Submitted {
+                id,
                 by,
                 at,
                 submission: serde_json::from_value(p).unwrap_or_default(),
@@ -409,7 +524,7 @@ impl Store {
         let rejection =
             self.latest_event(id, "task.changes_requested")
                 .await?
-                .map(|(by, at, p)| Rejected {
+                .map(|(_, by, at, p)| Rejected {
                     by,
                     at,
                     reason: p["reason"].as_str().unwrap_or("").to_string(),
@@ -443,9 +558,9 @@ impl Store {
         &self,
         task_id: &str,
         kind: &str,
-    ) -> Result<Option<(String, DateTime<Utc>, serde_json::Value)>> {
-        let row: Option<(String, DateTime<Utc>, String)> = sqlx::query_as(
-            "SELECT actor_id, at, payload FROM events
+    ) -> Result<Option<(String, String, DateTime<Utc>, serde_json::Value)>> {
+        let row: Option<(Vec<u8>, String, DateTime<Utc>, String)> = sqlx::query_as(
+            "SELECT event_id, actor_id, at, payload FROM events
              WHERE task_id = ? AND kind = ? AND event_id IS NOT NULL
              ORDER BY lamport DESC, event_id DESC LIMIT 1",
         )
@@ -453,9 +568,9 @@ impl Store {
         .bind(kind)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|(by, at, payload)| {
+        Ok(row.map(|(id, by, at, payload)| {
             let payload = serde_json::from_str(&payload).unwrap_or(json!({}));
-            (by, at, payload)
+            (hex::encode(id), by, at, payload)
         }))
     }
 
@@ -868,30 +983,57 @@ impl Store {
         self.get_task(task_id).await
     }
 
-    /// Approve: review → done. No claim requirement — any actor can review —
-    /// except that an agent cannot approve its own submission (PRD-v3 G2).
-    pub async fn approve(&self, task_id: &str, actor_id: &str) -> Result<Task> {
+    /// Approve: review → done. Takes a reviewer; an agent cannot approve its
+    /// own submission (PRD-v3 G2) or a protected task (R5). `submission`, if
+    /// given, is the id the reviewer read: a resubmission since then refuses.
+    pub async fn approve(
+        &self,
+        task_id: &str,
+        actor_id: &str,
+        submission: Option<&str>,
+    ) -> Result<Task> {
         self.require_role(actor_id, Role::Reviewer, "review tasks")
             .await?;
+        let agent = self.get_actor(actor_id).await?.kind == ActorKind::Agent;
         let signing_key = self.signing_key(actor_id).await?;
         let mut tx = self.begin_write().await?;
-        let submitter: Option<String> = sqlx::query_scalar(
-            "SELECT actor_id FROM events
+        let latest: Option<(Vec<u8>, String)> = sqlx::query_as(
+            "SELECT event_id, actor_id FROM events
              WHERE task_id = ? AND kind = 'task.submitted' AND event_id IS NOT NULL
              ORDER BY lamport DESC, event_id DESC LIMIT 1",
         )
         .bind(task_id)
         .fetch_optional(&mut *tx)
-        .await?
-        .flatten();
-        if submitter.as_deref() == Some(actor_id)
-            && self.get_actor(actor_id).await?.kind == ActorKind::Agent
-        {
+        .await?;
+        let (current, submitter) = latest.map(|(id, by)| (hex::encode(id), by)).unzip();
+        if agent && submitter.as_deref() == Some(actor_id) {
             return Err(Error::NotPermitted {
                 actor: actor_id.to_string(),
                 action: "approve its own submission".into(),
             });
         }
+        if let (Some(reviewed), Some(current)) = (submission, &current) {
+            if reviewed != current {
+                return Err(Error::StaleApproval {
+                    task: task_id.to_string(),
+                    reviewed: reviewed.to_string(),
+                    current: current.clone(),
+                });
+            }
+        }
+        let protected: Option<bool> =
+            sqlx::query_scalar("SELECT protected FROM tasks WHERE id = ?")
+                .bind(task_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if agent && protected == Some(true) {
+            return Err(Error::NotPermitted {
+                actor: actor_id.to_string(),
+                action: "approve a protected task (humans only)".into(),
+            });
+        }
+        // The approval names the submission it approves (PRD-v3 R4): on any
+        // replica it counts only while that submission is the one in review.
         self.transition_tx(
             &mut tx,
             &signing_key,
@@ -900,6 +1042,32 @@ impl Store {
             TaskStatus::Review,
             TaskStatus::Done,
             "task.approved",
+            json!({ "submission": current }),
+            Utc::now(),
+        )
+        .await?;
+        tx.commit().await?;
+        self.get_task(task_id).await
+    }
+
+    /// Mark a task protected: from now on only a human's approval counts
+    /// (PRD-v3 R5). There is no way back.
+    pub async fn protect_task(&self, task_id: &str, actor_id: &str) -> Result<Task> {
+        self.require_role(actor_id, Role::Planner, "protect tasks")
+            .await?;
+        let signing_key = self.signing_key(actor_id).await?;
+        let mut tx = self.begin_write().await?;
+        require_task_tx(&mut tx, task_id).await?;
+        sqlx::query("UPDATE tasks SET protected = 1 WHERE id = ?")
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+        self.append_event_tx(
+            &mut tx,
+            &signing_key,
+            actor_id,
+            task_id,
+            "task.protected",
             json!({}),
             Utc::now(),
         )
@@ -908,7 +1076,7 @@ impl Store {
         self.get_task(task_id).await
     }
 
-    /// Send back for rework: review → queue. The reason rides on the event
+    /// Send back for rework: review → queue.    /// Send back for rework: review → queue. The reason rides on the event
     /// for whoever picks the task up next (PRD-v3 M2).
     pub async fn request_changes(
         &self,
@@ -958,10 +1126,14 @@ impl Store {
                 .execute(&mut **tx)
                 .await?;
         if res.rows_affected() == 0 {
-            let current: TaskStatus = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
-                .bind(task_id)
-                .fetch_one(&mut **tx)
-                .await?;
+            let current: Option<TaskStatus> =
+                sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
+                    .bind(task_id)
+                    .fetch_optional(&mut **tx)
+                    .await?;
+            let Some(current) = current else {
+                return Err(Error::TaskNotFound(task_id.to_string()));
+            };
             return Err(Error::InvalidTransition {
                 task: task_id.to_string(),
                 from: current.to_string(),
@@ -1135,7 +1307,8 @@ impl Store {
         Ok(rows.into_iter().map(|(id,)| to_id(&id)).collect())
     }
 
-    /// The signed DAG + actor directory, for `rstask sync export`.
+    /// The signed DAG, for `rstask sync export`. Actors travel in it as
+    /// `actor.created` events.
     pub async fn export_bundle(&self) -> Result<SyncBundle> {
         // Alias keeps clippy's type_complexity quiet.
         type Row = (
@@ -1179,72 +1352,27 @@ impl Store {
             )
             .collect();
 
-        type ActorRowCols = (String, ActorKind, String, DateTime<Utc>, Vec<u8>, String);
-        let arows: Vec<ActorRowCols> = sqlx::query_as(
-            "SELECT a.id, a.kind, a.name, a.created_at, k.pubkey, a.roles
-                 FROM actors a JOIN actor_keys k ON k.actor_id = a.id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let actors = arows
-            .into_iter()
-            .map(|(id, kind, name, created_at, pubkey, roles)| ActorRow {
-                id,
-                kind,
-                name,
-                created_at,
-                pubkey: to_id(&pubkey),
-                roles: roles.into(),
-            })
-            .collect();
-
-        Ok(SyncBundle { events, actors })
+        Ok(SyncBundle { events })
     }
 
-    /// Apply a peer bundle (PRD-v2 sync). Unknown actors are learned
-    /// (trust-on-first-use within the trusted workspace); events are verified,
-    /// parked on missing parents, drained, and applied for their state effect.
+    /// Apply a peer bundle (PRD-v2 sync). Events are verified, parked on
+    /// missing parents, checked for authority (PRD-v3 R2, R3), drained, and
+    /// applied for their state effect.
     pub async fn receive_bundle(&self, bundle: &SyncBundle) -> Result<Merge> {
         let mut merge = Merge::default();
         let mut tx = self.begin_write().await?;
-        for row in &bundle.actors {
-            sqlx::query(
-                "INSERT OR IGNORE INTO actors (id, kind, name, created_at, roles)
-                 VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(&row.id)
-            .bind(row.kind)
-            .bind(&row.name)
-            .bind(row.created_at)
-            .bind(row.roles.to_string())
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query("INSERT OR IGNORE INTO actor_keys (actor_id, pubkey) VALUES (?, ?)")
-                .bind(&row.id)
-                .bind(row.pubkey.to_vec())
-                .execute(&mut *tx)
-                .await?;
-        }
         for bytes in &bundle.events {
             match StoredEvent::decode(bytes) {
-                Ok(ev) => match insert_remote_tx(&mut tx, &ev).await? {
+                Ok(ev) => match insert_remote_tx(&mut tx, &ev, &mut merge.rejected_ids).await? {
                     Insert::Added => merge.added += 1,
                     Insert::Parked => merge.pending += 1,
                     Insert::Duplicate => merge.duplicates += 1,
-                    Insert::Rejected(reason) => {
-                        merge.rejected += 1;
-                        let id = ev.id();
-                        merge
-                            .rejected_ids
-                            .push(format!("{}: {reason}", hex::encode(id)));
-                    }
+                    Insert::Rejected => {}
                 },
-                Err(e) => {
-                    merge.rejected += 1;
-                    merge.rejected_ids.push(e.to_string());
-                }
+                Err(e) => merge.rejected_ids.push(e.to_string()),
             }
         }
+        merge.rejected = merge.rejected_ids.len();
         tx.commit().await?;
         Ok(merge)
     }
@@ -1294,6 +1422,42 @@ async fn sweep_expired_tx(
     .bind(at)
     .execute(&mut **tx)
     .await?;
+    Ok(())
+}
+
+/// The workspace root: the actor whose self-signed `actor.created` is the
+/// DAG's first event (PRD-v3 R3).
+async fn root_actor_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT actor_id FROM events
+         WHERE kind = 'actor.created' AND parents = '[]' AND event_id IS NOT NULL LIMIT 1",
+    )
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+async fn insert_actor_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &str,
+    kind: ActorKind,
+    name: &str,
+    roles: &Roles,
+    pubkey: &[u8; 32],
+    at: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query("INSERT INTO actors (id, kind, name, created_at, roles) VALUES (?, ?, ?, ?, ?)")
+        .bind(id)
+        .bind(kind)
+        .bind(name)
+        .bind(at)
+        .bind(roles.to_string())
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("INSERT INTO actor_keys (actor_id, pubkey) VALUES (?, ?)")
+        .bind(id)
+        .bind(pubkey.to_vec())
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
@@ -1420,7 +1584,8 @@ enum Insert {
     Added,
     Parked,
     Duplicate,
-    Rejected(String),
+    /// The reason went to the caller's rejection list.
+    Rejected,
 }
 
 fn to_id(bytes: &[u8]) -> EventId {
@@ -1479,14 +1644,20 @@ async fn insert_heads_tx(
     Ok(())
 }
 
-/// Verify and insert one remote event: park on missing parents, else apply.
+/// Verify and insert one remote event: park on missing parents, else check
+/// its authority and apply. Rejections (of this event, or of parked events it
+/// unblocks) are appended to `rejected` as `<event id>: <reason>`.
 async fn insert_remote_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     ev: &StoredEvent,
+    rejected: &mut Vec<String>,
 ) -> Result<Insert> {
     let id = match ev.verify() {
         Ok(id) => id,
-        Err(e) => return Ok(Insert::Rejected(e.to_string())),
+        Err(e) => {
+            rejected.push(e.to_string());
+            return Ok(Insert::Rejected);
+        }
     };
     let known: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?1)
@@ -1498,24 +1669,14 @@ async fn insert_remote_tx(
     if known {
         return Ok(Insert::Duplicate);
     }
-    let pubkey: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT pubkey FROM actor_keys WHERE actor_id = ?")
-            .bind(&ev.body.actor_id)
-            .fetch_optional(&mut **tx)
-            .await?
-            .flatten();
-    match pubkey {
-        None => return Ok(Insert::Rejected("unknown actor".into())),
-        Some(pk) if to_id(&pk) != ev.pubkey => {
-            return Ok(Insert::Rejected("actor pubkey mismatch".into()));
-        }
-        _ => {}
-    }
     if parents_known_tx(tx, ev.parent_ids()).await? {
-        insert_dag_tx(tx, ev, &id).await?;
-        apply_effect_tx(tx, ev).await?;
-        drain_pending_tx(tx).await?;
-        Ok(Insert::Added)
+        let admitted = admit_tx(tx, ev, &id, rejected).await?;
+        drain_pending_tx(tx, rejected).await?;
+        Ok(if admitted {
+            Insert::Added
+        } else {
+            Insert::Rejected
+        })
     } else {
         sqlx::query(
             "INSERT OR IGNORE INTO pending_events (event_id, body, parents, received_at)
@@ -1528,6 +1689,146 @@ async fn insert_remote_tx(
         .execute(&mut **tx)
         .await?;
         Ok(Insert::Parked)
+    }
+}
+
+/// Admit an event whose parents are known: authority first (PRD-v3 R2, R3),
+/// then the DAG and its state effect. A refused event never enters the DAG,
+/// so nothing an honest replica writes can descend from it.
+async fn admit_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ev: &StoredEvent,
+    id: &EventId,
+    rejected: &mut Vec<String>,
+) -> Result<bool> {
+    if let Some(reason) = refusal_tx(tx, ev).await? {
+        rejected.push(format!("{}: {reason}", hex::encode(id)));
+        return Ok(false);
+    }
+    if ev.body.kind == "actor.created" {
+        // The event row references its author: for a root, the actor itself.
+        apply_effect_tx(tx, ev).await?;
+        insert_dag_tx(tx, ev, id).await?;
+    } else {
+        insert_dag_tx(tx, ev, id).await?;
+        apply_effect_tx(tx, ev).await?;
+    }
+    Ok(true)
+}
+
+/// A new actor as described by an `actor.created` event.
+struct NewActor {
+    kind: ActorKind,
+    name: String,
+    roles: Roles,
+    pubkey: [u8; 32],
+}
+
+fn new_actor(payload: &serde_json::Value) -> Option<NewActor> {
+    Some(NewActor {
+        kind: serde_json::from_value(payload["kind"].clone()).ok()?,
+        name: payload["name"].as_str()?.to_string(),
+        roles: serde_json::from_value(payload["roles"].clone()).ok()?,
+        pubkey: hex::decode(payload["pubkey"].as_str()?)
+            .ok()?
+            .try_into()
+            .ok()?,
+    })
+}
+
+/// Why this event must not enter the DAG, if it must not. These checks
+/// depend only on the event, its parents and its author's fixed attributes,
+/// so every replica reaches the same verdict. What depends on the task's
+/// state at that point in the log is decided by the fold.
+async fn refusal_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ev: &StoredEvent,
+) -> Result<Option<String>> {
+    let body = &ev.body;
+    let refuse = |reason: &str| Ok(Some(reason.to_string()));
+    let payload: serde_json::Value = serde_json::from_str(&body.payload).unwrap_or(json!({}));
+
+    // A Lamport clock is one past its parents': it cannot be rewound to win
+    // a first-wins race.
+    let parent_max: Option<i64> = if body.parents.is_empty() {
+        None
+    } else {
+        let marks = vec!["?"; body.parents.len()].join(",");
+        let sql = format!("SELECT max(lamport) FROM events WHERE event_id IN ({marks})");
+        let mut q = sqlx::query_scalar::<_, Option<i64>>(&sql);
+        for p in &body.parents {
+            q = q.bind(p.to_vec());
+        }
+        q.fetch_one(&mut **tx).await?
+    };
+    if body.lamport != parent_max.map_or(0, |m| m as u64 + 1) {
+        return refuse("lamport clock does not follow its parents");
+    }
+
+    if body.kind == "actor.created" {
+        let Some(actor) = new_actor(&payload) else {
+            return refuse("malformed actor.created");
+        };
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM actors WHERE id = ?)")
+            .bind(&body.task_id)
+            .fetch_one(&mut **tx)
+            .await?;
+        if exists {
+            return refuse("actor already exists");
+        }
+        if body.parents.is_empty() {
+            // The workspace root: the one self-signed human at the start.
+            let started: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE event_id IS NOT NULL)",
+            )
+            .fetch_one(&mut **tx)
+            .await?;
+            if started {
+                return refuse("a different workspace: this one already has its root");
+            }
+            if body.actor_id != body.task_id
+                || actor.pubkey != ev.pubkey
+                || actor.kind != ActorKind::Human
+            {
+                return refuse("the workspace root must be a self-signed human");
+            }
+            return Ok(None);
+        }
+    } else if body.parents.is_empty() {
+        return refuse("only the workspace root has no parents");
+    }
+
+    let signer: Option<(ActorKind, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT a.kind, a.roles, k.pubkey FROM actors a
+         JOIN actor_keys k ON k.actor_id = a.id WHERE a.id = ?",
+    )
+    .bind(&body.actor_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((kind, roles, pubkey)) = signer else {
+        return refuse("unknown actor");
+    };
+    if pubkey[..] != ev.pubkey[..] {
+        return refuse("actor pubkey mismatch");
+    }
+    let roles = Roles::from(roles);
+    let needs = |role: Role| {
+        if roles.0.contains(&role) {
+            Ok(None)
+        } else {
+            Ok(Some(format!("{} needs role {role}", body.kind)))
+        }
+    };
+    match body.kind.as_str() {
+        "actor.created" | "claim.force_released" if kind != ActorKind::Human => {
+            refuse(&format!("{} is for humans only", body.kind))
+        }
+        "task.created" | "task.blocked" | "task.unblocked" | "task.protected" => {
+            needs(Role::Planner)
+        }
+        "task.claimed" => needs(Role::Worker),
+        "task.approved" | "task.changes_requested" => needs(Role::Reviewer),
+        _ => Ok(None),
     }
 }
 
@@ -1579,7 +1880,10 @@ async fn insert_dag_tx(
 
 /// Parked events whose parents have arrived, inserted and applied (repeating,
 /// since one unblock can cascade).
-async fn drain_pending_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<()> {
+async fn drain_pending_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    rejected: &mut Vec<String>,
+) -> Result<()> {
     loop {
         let rows: Vec<(Vec<u8>, Vec<u8>)> =
             sqlx::query_as("SELECT event_id, body FROM pending_events ORDER BY received_at")
@@ -1589,8 +1893,7 @@ async fn drain_pending_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Resul
         for (eid, body) in rows {
             let ev = StoredEvent::decode(&body)?;
             if parents_known_tx(tx, ev.parent_ids()).await? {
-                insert_dag_tx(tx, &ev, &to_id(&eid)).await?;
-                apply_effect_tx(tx, &ev).await?;
+                admit_tx(tx, &ev, &to_id(&eid), rejected).await?;
                 sqlx::query("DELETE FROM pending_events WHERE event_id = ?")
                     .bind(&eid)
                     .execute(&mut **tx)
@@ -1604,7 +1907,7 @@ async fn drain_pending_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Resul
     }
 }
 
-/// Deterministic state effect of one applied event (PRD-v2 sync).
+/// Deterministic state effect of one admitted event (PRD-v2 sync).
 async fn apply_effect_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     ev: &StoredEvent,
@@ -1612,6 +1915,12 @@ async fn apply_effect_tx(
     let payload: serde_json::Value =
         serde_json::from_str(&ev.body.payload).unwrap_or(serde_json::json!({}));
     match ev.body.kind.as_str() {
+        "actor.created" => {
+            if let Some(a) = new_actor(&payload) {
+                let id = &ev.body.task_id;
+                insert_actor_tx(tx, id, a.kind, &a.name, &a.roles, &a.pubkey, ev.body.at).await?;
+            }
+        }
         "task.created" => {
             sqlx::query(
                 "INSERT OR IGNORE INTO tasks
@@ -1628,30 +1937,13 @@ async fn apply_effect_tx(
             .execute(&mut **tx)
             .await?;
         }
-        "task.updated" => {
-            let get_str = |k: &str| payload.get(k).and_then(|v| v.as_str());
-            let title = get_str("title");
-            let body_md = get_str("body_md");
-            let priority = payload.get("priority").and_then(|v| v.as_i64());
-            sqlx::query(
-                "UPDATE tasks SET
-                     title = COALESCE(?, title), body_md = COALESCE(?, body_md),
-                     priority = COALESCE(?, priority), updated_at = ?
-                 WHERE id = ?",
-            )
-            .bind(title)
-            .bind(body_md)
-            .bind(priority)
-            .bind(ev.body.at)
-            .bind(&ev.body.task_id)
-            .execute(&mut **tx)
-            .await?;
-        }
         "task.blocked" | "task.unblocked" => {
             refold_deps_tx(tx, &ev.body.task_id).await?;
         }
-        // Claims and status fold per task below (D8, PRD-v3 G1).
-        "task.claimed"
+        // Content, claims and status fold per task below (D8, PRD-v3 G1, R2).
+        "task.updated"
+        | "task.protected"
+        | "task.claimed"
         | "task.renewed"
         | "claim.released"
         | "claim.force_released"
@@ -1698,27 +1990,38 @@ impl Fold {
     }
 }
 
-/// Re-fold a task's workflow events in `(lamport, event_id)` order: the first
-/// claim wins the lock, later concurrent claims stay in the log but are
-/// ineffective (PRD-v2 D8); the status walks the gate, and an event that does
-/// not fit the status reached so far is ineffective too (PRD-v3 G1). Expiry is
-/// judged against each event's own `at` — the local clock only decides whether
-/// the last holder has lapsed by now — and a renewal the holder made before
-/// its claim lapsed always counts, wherever it sorts in the log (PRD-v3 M1).
-/// Recomputed wholesale on
-/// every workflow merge so the result never depends on arrival order.
+/// Re-fold a task's events in `(lamport, event_id)` order into its content,
+/// claim and status. The first claim wins the lock; later concurrent claims
+/// stay in the log but are ineffective (PRD-v2 D8). The status walks the gate,
+/// and an event that does not fit the state reached so far — or whose author
+/// had no right to it at that point (PRD-v3 R2: not the holder, approving its
+/// own or a superseded submission, an agent on a protected task) — is
+/// ineffective too. Expiry is judged against each event's own `at` — the local
+/// clock only decides whether the last holder has lapsed by now — and a
+/// renewal the holder made before its claim lapsed always counts, wherever it
+/// sorts in the log (PRD-v3 M1). Recomputed wholesale on every merge that
+/// touches the task, so the result never depends on arrival order.
 async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &str) -> Result<()> {
-    let rows: Vec<(String, String, DateTime<Utc>, String)> = sqlx::query_as(
-        "SELECT kind, actor_id, at, payload FROM events
+    // (event id, kind, actor, at, payload)
+    type Row = (Vec<u8>, String, String, DateTime<Utc>, String);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT event_id, kind, actor_id, at, payload FROM events
          WHERE task_id = ?1 AND event_id IS NOT NULL
-           AND kind IN ('task.created','task.updated','task.claimed','task.renewed',
-                        'claim.released','claim.force_released','task.submitted',
-                        'task.approved','task.changes_requested')
+           AND kind IN ('task.created','task.updated','task.protected','task.claimed',
+                        'task.renewed','claim.released','claim.force_released',
+                        'task.submitted','task.approved','task.changes_requested')
          ORDER BY lamport, event_id",
     )
     .bind(task_id)
     .fetch_all(&mut **tx)
     .await?;
+    let actors: HashMap<String, (ActorKind, Roles)> =
+        sqlx::query_as::<_, (String, ActorKind, String)>("SELECT id, kind, roles FROM actors")
+            .fetch_all(&mut **tx)
+            .await?
+            .into_iter()
+            .map(|(id, kind, roles)| (id, (kind, roles.into())))
+            .collect();
 
     let json = |payload: &str| -> serde_json::Value {
         serde_json::from_str(payload).unwrap_or(serde_json::json!({}))
@@ -1731,7 +2034,7 @@ async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &
     // in time order, each counting only if made before the claim lapsed.
     let mut expiry: HashMap<String, (&str, DateTime<Utc>)> = HashMap::new();
     let mut renewals = Vec::new();
-    for (kind, actor_id, at, payload) in &rows {
+    for (_, kind, actor_id, at, payload) in &rows {
         let p = json(payload);
         match (kind.as_str(), expiry_of(&p)) {
             ("task.claimed", Some(exp)) => {
@@ -1761,14 +2064,40 @@ async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &
         status: TaskStatus::Queue,
         status_at: None,
     };
-    // Latest content change; with `status_at` it derives `updated_at`.
+    // Content, and its latest change; with `status_at` it derives `updated_at`.
+    let (mut title, mut body_md, mut priority) = (None, None, None);
     let mut content_at: Option<DateTime<Utc>> = None;
+    let mut protected = false;
+    // The submission now in review: (event id, submitter).
+    let mut in_review: Option<(String, String)> = None;
 
-    for (kind, actor_id, at, payload) in rows {
-        let claim_id = claim_id_of(&json(&payload));
+    for (event_id, kind, actor_id, at, payload) in rows {
+        let p = json(&payload);
+        let claim_id = claim_id_of(&p);
+        let who = actors.get(&actor_id);
+        let human = matches!(who, Some((ActorKind::Human, _)));
+        let planner = who.is_some_and(|(_, roles)| roles.0.contains(&Role::Planner));
         f.expire(at);
         match kind.as_str() {
-            "task.created" | "task.updated" => content_at = content_at.max(Some(at)),
+            "task.created" => {
+                title = p["title"].as_str().map(str::to_string);
+                body_md = p["body_md"].as_str().map(str::to_string);
+                content_at = content_at.max(Some(at));
+            }
+            // While claimed only the holder edits; otherwise a planner.
+            "task.updated" if f.held.as_ref().map_or(planner, |h| h.actor_id == actor_id) => {
+                if let Some(t) = p["title"].as_str() {
+                    title = Some(t.to_string());
+                }
+                if let Some(b) = p["body_md"].as_str() {
+                    body_md = Some(b.to_string());
+                }
+                if let Some(n) = p["priority"].as_i64() {
+                    priority = Some(n);
+                }
+                content_at = content_at.max(Some(at));
+            }
+            "task.protected" => protected = true,
             "task.claimed" if f.held.is_none() && f.status == TaskStatus::Queue => {
                 if let Some(&expires_at) = expiry.get(&claim_id) {
                     f.held = Some(Held {
@@ -1782,17 +2111,36 @@ async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &
             }
             // Any other claim: the task is held or past `queue` — ineffective (D8).
             "claim.released" | "claim.force_released" | "task.submitted" => {
-                if let Some(h) = f.held.take_if(|h| h.id == claim_id) {
+                // Only the holder releases or submits; a human may force.
+                let forced = kind == "claim.force_released";
+                if let Some(h) = f
+                    .held
+                    .take_if(|h| h.id == claim_id && (forced || h.actor_id == actor_id))
+                {
                     let (reason, status) = match kind.as_str() {
                         "claim.force_released" => (ReleaseReason::Forced, TaskStatus::Queue),
                         "task.submitted" => (ReleaseReason::Done, TaskStatus::Review),
                         _ => (ReleaseReason::Released, TaskStatus::Queue),
                     };
+                    if kind == "task.submitted" {
+                        in_review = Some((hex::encode(&event_id), actor_id));
+                    }
                     f.ended.push((h.id, reason, at));
                     f.set(status, at);
                 }
             }
-            "task.approved" if f.status == TaskStatus::Review => f.set(TaskStatus::Done, at),
+            "task.approved" if f.status == TaskStatus::Review => {
+                // It must name the submission in review (R4), not be the
+                // submitting agent's own (G2), and be a human's on a
+                // protected task (R5).
+                let counts = in_review.as_ref().is_some_and(|(id, submitter)| {
+                    p["submission"].as_str() == Some(id.as_str())
+                        && (human || *submitter != actor_id)
+                }) && (human || !protected);
+                if counts {
+                    f.set(TaskStatus::Done, at);
+                }
+            }
             "task.changes_requested" if f.status == TaskStatus::Review => {
                 f.set(TaskStatus::Queue, at);
             }
@@ -1842,11 +2190,21 @@ async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &
     .await?;
     // The events that decided status and content stamp `updated_at`, so
     // replicas agree on it as well.
-    sqlx::query("UPDATE tasks SET status = ?, updated_at = COALESCE(?, updated_at) WHERE id = ?")
-        .bind(f.status)
-        .bind(f.status_at.max(content_at))
-        .bind(task_id)
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query(
+        "UPDATE tasks SET
+             title = COALESCE(?, title), body_md = COALESCE(?, body_md),
+             priority = COALESCE(?, priority), protected = max(protected, ?),
+             status = ?, updated_at = COALESCE(?, updated_at)
+         WHERE id = ?",
+    )
+    .bind(title)
+    .bind(body_md)
+    .bind(priority)
+    .bind(protected)
+    .bind(f.status)
+    .bind(f.status_at.max(content_at))
+    .bind(task_id)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
