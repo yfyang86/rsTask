@@ -40,6 +40,22 @@ enum Command {
 
     /// Kanban-style aggregate: tasks grouped by status.
     Board,
+
+    /// Sync the signed event DAG with another replica (file bundles; wire in sprint 02).
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncCommand {
+    /// Export the signed event DAG + actor directory as a binary bundle (stdout).
+    Export,
+    /// Import a bundle from stdin; prints merge stats as JSON.
+    Import,
+    /// Show sync state: heads, DAG event count, pending count.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -49,7 +65,9 @@ enum ActorCommand {
         #[arg(long, value_enum, default_value = "human")]
         kind: KindArg,
     },
-    Heartbeat { id: String },
+    Heartbeat {
+        id: String,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -72,7 +90,9 @@ enum TaskCommand {
         #[arg(long, value_enum)]
         status: Option<StatusArg>,
     },
-    Show { id: String },
+    Show {
+        id: String,
+    },
     /// Claim = atomic lock with TTL. Default TTL 15 min.
     Claim {
         id: String,
@@ -90,13 +110,27 @@ enum TaskCommand {
         force: bool,
     },
     /// Work → review. Releases the claim.
-    Submit { id: String, #[arg(long)] actor: String },
+    Submit {
+        id: String,
+        #[arg(long)]
+        actor: String,
+    },
     /// Review → done (reviewer approval; agents can't self-approve).
-    Approve { id: String, #[arg(long)] actor: String },
+    Approve {
+        id: String,
+        #[arg(long)]
+        actor: String,
+    },
     /// Review → queue (send back for rework).
-    Reject { id: String, #[arg(long)] actor: String },
+    Reject {
+        id: String,
+        #[arg(long)]
+        actor: String,
+    },
     /// Show the immutable event log of a task.
-    Log { id: String },
+    Log {
+        id: String,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -122,8 +156,7 @@ impl From<StatusArg> for TaskStatus {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
 
@@ -199,6 +232,29 @@ async fn main() -> anyhow::Result<()> {
                 print_task_table(&tasks);
             }
         }
+        Command::Sync { command } => match command {
+            SyncCommand::Export => {
+                let bundle = store.export_bundle().await?;
+                let bytes = rstask_core::sync::encode_bundle(&bundle);
+                std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
+            }
+            SyncCommand::Import => {
+                let mut buf = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
+                let bundle = rstask_core::sync::decode_bundle(&buf)?;
+                let merge = store.receive_bundle(&bundle).await?;
+                println!("{}", serde_json::to_string_pretty(&merge)?);
+            }
+            SyncCommand::Status => {
+                let heads = store.heads().await?;
+                let status = serde_json::json!({
+                    "heads": heads.iter().map(hex::encode).collect::<Vec<_>>(),
+                    "events": store.dag_event_count().await?,
+                    "pending": store.pending_count().await?,
+                });
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            }
+        },
     }
     Ok(())
 }

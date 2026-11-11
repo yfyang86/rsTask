@@ -1,0 +1,15 @@
+== U5: import of tampered bundle (byte flipped at offset 1616 of 3233) ==
+{
+  "added": 5,
+  "pending": 3,
+  "duplicates": 0,
+  "rejected": 1,
+  "rejected_ids": [
+    "invalid event : undecodable event: Tried to parse invalid utf-8"
+  ]
+}
+
+== U5: C state after tampered import ==
+id        status    prio   title
+1ef7eb3b  work  0      hello world
+8282fabf  queue  0      from b

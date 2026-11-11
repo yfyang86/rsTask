@@ -13,7 +13,10 @@ async fn setup() -> (Store, String) {
 #[tokio::test]
 async fn create_and_list_task() {
     let (store, alice) = setup().await;
-    let task = store.create_task("write spec", "body", &alice).await.unwrap();
+    let task = store
+        .create_task("write spec", "body", &alice)
+        .await
+        .unwrap();
     assert_eq!(task.status, TaskStatus::Queue);
 
     let listed = store.list_tasks(None).await.unwrap();
@@ -49,7 +52,10 @@ async fn claim_is_exclusive_and_moves_to_work() {
         other => panic!("expected ClaimConflict, got {other:?}"),
     }
 
-    assert_eq!(store.get_task(&task.id).await.unwrap().status, TaskStatus::Work);
+    assert_eq!(
+        store.get_task(&task.id).await.unwrap().status,
+        TaskStatus::Work
+    );
 }
 
 #[tokio::test]
@@ -69,7 +75,10 @@ async fn expired_claim_returns_task_to_pool() {
         .claim_task(&task.id, &agent.id, Duration::from_secs(60))
         .await
         .unwrap();
-    assert_eq!(store.get_task(&task.id).await.unwrap().status, TaskStatus::Work);
+    assert_eq!(
+        store.get_task(&task.id).await.unwrap().status,
+        TaskStatus::Work
+    );
 
     // The stale claim is recorded as expired in the log.
     let events = store.list_events(&task.id).await.unwrap();
@@ -87,7 +96,10 @@ async fn workflow_gate_enforced() {
     assert!(matches!(err, Error::InvalidTransition { .. }));
 
     // Cannot submit without claiming first (queue → review is illegal).
-    let err = store.submit_for_review(&task.id, &agent.id).await.unwrap_err();
+    let err = store
+        .submit_for_review(&task.id, &agent.id)
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::InvalidTransition { .. }));
 
     // The happy path: claim → work → submit → review → approve → done.
@@ -96,10 +108,16 @@ async fn workflow_gate_enforced() {
         .await
         .unwrap();
     store.submit_for_review(&task.id, &agent.id).await.unwrap();
-    assert_eq!(store.get_task(&task.id).await.unwrap().status, TaskStatus::Review);
+    assert_eq!(
+        store.get_task(&task.id).await.unwrap().status,
+        TaskStatus::Review
+    );
 
     store.approve(&task.id, &alice).await.unwrap();
-    assert_eq!(store.get_task(&task.id).await.unwrap().status, TaskStatus::Done);
+    assert_eq!(
+        store.get_task(&task.id).await.unwrap().status,
+        TaskStatus::Done
+    );
 
     // Changes can no longer be requested once done.
     let err = store.request_changes(&task.id, &alice).await.unwrap_err();
@@ -116,7 +134,10 @@ async fn request_changes_sends_back_to_queue() {
         .unwrap();
     store.submit_for_review(&task.id, &alice).await.unwrap();
     store.request_changes(&task.id, &alice).await.unwrap();
-    assert_eq!(store.get_task(&task.id).await.unwrap().status, TaskStatus::Queue);
+    assert_eq!(
+        store.get_task(&task.id).await.unwrap().status,
+        TaskStatus::Queue
+    );
 
     // Can be re-claimed after rework.
     store
@@ -137,8 +158,14 @@ async fn force_release_frees_stale_claim() {
         .unwrap();
 
     // Alice force-releases the agent's stale claim.
-    store.release_claim(&task.id, &agent.id, true).await.unwrap();
-    assert_eq!(store.get_task(&task.id).await.unwrap().status, TaskStatus::Queue);
+    store
+        .release_claim(&task.id, &agent.id, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_task(&task.id).await.unwrap().status,
+        TaskStatus::Queue
+    );
 
     // Task is claimable again.
     store
@@ -151,7 +178,10 @@ async fn force_release_frees_stale_claim() {
 async fn release_without_active_claim_fails() {
     let (store, alice) = setup().await;
     let task = store.create_task("t", "", &alice).await.unwrap();
-    let err = store.release_claim(&task.id, &alice, false).await.unwrap_err();
+    let err = store
+        .release_claim(&task.id, &alice, false)
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::ClaimConflict { .. }));
 }
 

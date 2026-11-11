@@ -32,6 +32,15 @@ pub enum Error {
 
     #[error(transparent)]
     Config(#[from] ConfigError),
+
+    #[error("invalid event {id}: {reason}")]
+    InvalidEvent { id: String, reason: String },
+
+    #[error("actor {0} has no signing key (pre-sync actor or learned from a peer)")]
+    NoSigningKey(String),
+
+    #[error("invalid sync bundle: {0}")]
+    InvalidBundle(String),
 }
 
 #[derive(Debug, Error)]

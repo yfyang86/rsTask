@@ -94,7 +94,9 @@ impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let mut cfg = Config::default();
 
-        let path = path.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("config.toml"));
+        let path = path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("config.toml"));
         if path.exists() {
             let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io {
                 path: path.display().to_string(),
@@ -135,8 +137,13 @@ impl Config {
 mod tests {
     use super::*;
 
+    /// The env-layer tests mutate process env; serialize them so parallel
+    /// tests never observe each other's `RSTASK_*` variables.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn defaults_match_spec() {
+        let _g = ENV_LOCK.lock().unwrap();
         let cfg = Config::default();
         assert_eq!(cfg.server.port, 7700);
         assert_eq!(cfg.auth.mode, "offline");
@@ -148,6 +155,7 @@ mod tests {
 
     #[test]
     fn file_layer_overrides_defaults() {
+        let _g = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("rstask-cfg-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
@@ -160,6 +168,7 @@ mod tests {
 
     #[test]
     fn env_beats_file() {
+        let _g = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("rstask-cfg-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");

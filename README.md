@@ -40,3 +40,18 @@ cargo run -p rstask-cli -- board
 ```sh
 cargo test -p rstask-core
 ```
+
+## Sync (sprint 01)
+
+Every mutation is a signed (Ed25519), content-addressed (BLAKE3) event in a
+Lamport-clock DAG; task state is derived from the log (see `PRD/PRD-v2.md`).
+
+```sh
+rstask --db wa.sqlite sync export > a.bundle   # signed DAG + actor directory
+rstask --db wb.sqlite sync import < a.bundle   # verify → merge → converge
+rstask sync status                             # heads, event count, pending
+```
+
+Concurrent claims resolve deterministically on every replica: first claim by
+`(lamport, event_id)` wins, losers stay in the log but are ineffective. Wire
+transport (iroh QUIC) is sprint 02.

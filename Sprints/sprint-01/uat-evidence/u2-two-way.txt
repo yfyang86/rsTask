@@ -1,0 +1,52 @@
+== U2: A status ==
+{
+  "events": 7,
+  "heads": [
+    "7c2e4fff89636d948ef37b0d51b6239cf846da27abee86eb282d44396e158eb3",
+    "b31a7cf1515081858b8e666af0d25ffb29225f72e60dd94007193f1935e5a939"
+  ],
+  "pending": 0
+}
+
+== U2: B status ==
+{
+  "events": 7,
+  "heads": [
+    "7c2e4fff89636d948ef37b0d51b6239cf846da27abee86eb282d44396e158eb3",
+    "b31a7cf1515081858b8e666af0d25ffb29225f72e60dd94007193f1935e5a939"
+  ],
+  "pending": 0
+}
+
+== U2: A task list ==
+id        status    prio   title
+1ef7eb3b  done  0      hello world
+8282fabf  queue  0      from b
+
+== U2: B task list ==
+id        status    prio   title
+1ef7eb3b  done  0      hello world
+8282fabf  queue  0      from b
+
+== U2: merge stats a->b, b->a, re-sync ==
+{
+  "added": 3,
+  "pending": 0,
+  "duplicates": 3,
+  "rejected": 0,
+  "rejected_ids": []
+}
+{
+  "added": 1,
+  "pending": 0,
+  "duplicates": 6,
+  "rejected": 0,
+  "rejected_ids": []
+}
+{
+  "added": 0,
+  "pending": 0,
+  "duplicates": 7,
+  "rejected": 0,
+  "rejected_ids": []
+}

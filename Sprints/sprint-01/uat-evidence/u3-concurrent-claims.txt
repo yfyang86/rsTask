@@ -1,0 +1,51 @@
+== U3: merge stats a->b ==
+{
+  "added": 1,
+  "pending": 0,
+  "duplicates": 7,
+  "rejected": 0,
+  "rejected_ids": []
+}
+== U3: merge stats b->a ==
+{
+  "added": 1,
+  "pending": 0,
+  "duplicates": 8,
+  "rejected": 0,
+  "rejected_ids": []
+}
+
+== U3: A task log (both claim events present) ==
+[
+  {
+    "kind": "task.created",
+    "lamport": 3,
+    "actor_id": "2ccbc5d1-b671-4815-9c1d-1343c5961e5b",
+    "payload": "{\"body_md\":\"\",\"title\":\"from b\"}"
+  },
+  {
+    "kind": "task.claimed",
+    "lamport": 6,
+    "actor_id": "ba8340ea-b12f-4dbb-b534-9c10e879e925",
+    "payload": "{\"claim_id\":\"4007ef21-b20c-4fc5-b7bb-c55f0b041d73\",\"expires_at\":\"2026-11-11T07:05:51.792518Z\"}"
+  },
+  {
+    "kind": "task.claimed",
+    "lamport": 6,
+    "actor_id": "30f0a9a6-6ab7-403c-8618-1f2e84bbf4ff",
+    "payload": "{\"claim_id\":\"3ae50cd1-0301-4c20-b189-f04f2153be6b\",\"expires_at\":\"2026-11-11T07:05:51.780239Z\"}"
+  }
+]
+
+== U3: A active claims ==
+4007ef21-b20c-4fc5-b7bb-c55f0b041d73|y|
+== U3: B active claims ==
+4007ef21-b20c-4fc5-b7bb-c55f0b041d73|y|
+
+== U3: A task status ==
+work
+== U3: B task status ==
+work
+
+== U3: B claim history (winner kept, loser folded out) ==
+y|

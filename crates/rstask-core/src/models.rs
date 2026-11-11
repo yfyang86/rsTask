@@ -74,7 +74,7 @@ pub struct Actor {
     pub last_heartbeat_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize, PartialEq, Eq)]
 pub struct Task {
     pub id: String,
     pub title: String,
@@ -99,6 +99,9 @@ pub struct Claim {
 
 /// Immutable log entry. `seq` is a monotonic AUTOINCREMENT — the event log
 /// is append-only by construction.
+///
+/// DAG columns (PRD-v2 D3): `event_id`/`lamport`/`parents`/`signature`/`pubkey`
+/// are NULL on v1 rows, which stay local-only and are never synced.
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct Event {
     pub seq: i64,
@@ -107,4 +110,10 @@ pub struct Event {
     pub kind: String,
     pub payload: String,
     pub at: DateTime<Utc>,
+    pub event_id: Option<Vec<u8>>,
+    pub lamport: Option<i64>,
+    /// JSON array of hex parent ids.
+    pub parents: String,
+    pub signature: Option<Vec<u8>>,
+    pub pubkey: Option<Vec<u8>>,
 }
