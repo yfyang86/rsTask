@@ -1,0 +1,16 @@
+# U1 — an actor joins from another machine without a secret key moving
+$ B (empty replica): actor request bob --kind agent --role worker
+{"id":"bob","kind":"agent","name":"bob","roles":["worker"],"pubkey":"<hex>","proof":"<hex>"}
+$ A: actor admit '<request>'
+{"name":"bob","kind":"agent","roles":["worker"]}
+bob's creation event: {"kind":"actor.created","signed_by":"alice"}
+key files — A: alice.key x.key   B: bob.key 
+$ B: p2p sync <A>; task claim --actor bob
+{"received":4}
+{"actor_id":"bob"}
+{"sent":1,"refused_by_peer":0}
+A sees the task held by: bob
+$ A: actor admit <the request with its name changed to root>
+Error: invalid actor request: it was changed after it was made, or not made by this key
+$ (workspace with no actors): actor admit '<request>'
+Error: actor bob is not permitted to be admitted: this workspace has no root yet (`actor new`)

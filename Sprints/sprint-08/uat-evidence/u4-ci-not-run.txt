@@ -1,0 +1,3 @@
+# U4 — pull requests are checked
+NOT RUN YET: the workflow triggers on pull requests and on pushes to main;
+this branch has no pull request. Open one and the "CI / gate" check will run.

@@ -558,6 +558,15 @@ async fn serve(h: &Handler, conn: &Connection) -> Result<()> {
             }
             Msg::Push(events) if events.len() <= EVENT_BATCH => {
                 let merge = h.store.receive_events(&events).await?;
+                for lost in &merge.lost_claims {
+                    tracing::warn!(
+                        task = %lost.task_id,
+                        actor = %lost.actor_id,
+                        reason = %lost.reason,
+                        "claim lost in a sync from {}",
+                        remote.fmt_short()
+                    );
+                }
                 Msg::PushAck {
                     added: merge.added as u32,
                     rejected: merge.rejected as u32,

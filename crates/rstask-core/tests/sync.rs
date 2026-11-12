@@ -530,3 +530,75 @@ async fn s02_ids_and_events_by_bucket() {
     assert!(boards_equal(&a, &b).await);
     assert_eq!(a.buckets().await.unwrap(), b.buckets().await.unwrap());
 }
+
+// ---- Sprint 08: a merge reports the claims it took away (UAT U3) ----
+
+#[tokio::test]
+async fn s08_merge_reports_lost_claims() {
+    let a = store().await;
+    let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
+    let x = a.create_actor(ActorKind::Agent, "x").await.unwrap();
+    let contested = a.create_task("contested", "", &alice.id).await.unwrap();
+    let hung = a.create_task("hung", "", &alice.id).await.unwrap();
+    let dropped = a.create_task("dropped", "", &alice.id).await.unwrap();
+    let b = store().await;
+    let y = provision(&a, &b, ActorKind::Agent, "y").await;
+    let ttl = Duration::from_secs(900);
+
+    // Disconnected: both claim `contested`; on B, y also holds `hung` and
+    // `dropped`. On A, alice force-releases `hung` (A knows y's claim? no —
+    // so first let A learn the two uncontested claims).
+    b.claim_task(&hung.id, &y.id, ttl).await.unwrap();
+    b.claim_task(&dropped.id, &y.id, ttl).await.unwrap();
+    exchange(&b, &a).await;
+    a.claim_task(&contested.id, &x.id, ttl).await.unwrap();
+    b.claim_task(&contested.id, &y.id, ttl).await.unwrap();
+    a.release_claim(&hung.id, &alice.id, true).await.unwrap();
+    // y gives `dropped` up itself, on B: that is not a loss.
+    b.release_claim(&dropped.id, &y.id, false).await.unwrap();
+
+    let into_b = b
+        .receive_bundle(&a.export_bundle().await.unwrap())
+        .await
+        .unwrap();
+    let into_a = a
+        .receive_bundle(&b.export_bundle().await.unwrap())
+        .await
+        .unwrap();
+
+    // The forced release always reaches y's replica as a loss.
+    let forced: Vec<_> = into_b
+        .lost_claims
+        .iter()
+        .filter(|l| l.task_id == hung.id)
+        .collect();
+    assert_eq!(forced.len(), 1, "{into_b:?}");
+    assert_eq!(
+        (forced[0].actor_id.as_str(), forced[0].reason.as_str()),
+        (y.id.as_str(), "force_released")
+    );
+
+    // Exactly one of x and y lost `contested`, reported on the loser's replica.
+    let lost: Vec<_> = into_a
+        .lost_claims
+        .iter()
+        .chain(&into_b.lost_claims)
+        .filter(|l| l.task_id == contested.id)
+        .collect();
+    assert_eq!(lost.len(), 1, "a: {into_a:?}\nb: {into_b:?}");
+    assert_eq!(lost[0].reason, "superseded");
+    let winner = active_claims(&a, &contested.id).await;
+    assert_eq!(winner, active_claims(&b, &contested.id).await);
+    assert_ne!(lost[0].actor_id, winner[0]);
+
+    // Nothing else is a loss: not y's own release, and not on a re-merge.
+    assert!(
+        into_a.lost_claims.iter().all(|l| l.task_id != dropped.id),
+        "{into_a:?}"
+    );
+    let again = b
+        .receive_bundle(&a.export_bundle().await.unwrap())
+        .await
+        .unwrap();
+    assert!(again.lost_claims.is_empty(), "{again:?}");
+}

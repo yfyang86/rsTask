@@ -12,7 +12,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde_json::json;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Connection, Row, SqliteConnection, SqlitePool};
@@ -22,10 +22,10 @@ use crate::error::{Error, Result};
 use crate::event::{EventId, Signable, StoredEvent};
 use crate::keys::Keyring;
 use crate::models::{
-    Actor, ActorKind, Claim, Event, Peer, Rejected, ReleaseReason, Role, Roles, Submission,
-    Submitted, Task, TaskDetail, TaskStatus,
+    Actor, ActorKind, ActorRequest, Claim, Event, Peer, Rejected, ReleaseReason, Role, Roles,
+    Submission, Submitted, Task, TaskDetail, TaskStatus,
 };
-use crate::sync::{Bucket, Merge, SyncBundle, BUCKET};
+use crate::sync::{Bucket, LostClaim, Merge, SyncBundle, BUCKET};
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_dag.sql");
@@ -191,20 +191,93 @@ impl Store {
         roles: &[Role],
         by: Option<&str>,
     ) -> Result<Actor> {
-        let roles = Roles(if roles.is_empty() {
-            Role::ALL.to_vec()
-        } else {
-            Role::ALL
-                .into_iter()
-                .filter(|r| roles.contains(r))
-                .collect()
-        });
         let id = Uuid::new_v4().to_string();
+        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        self.create_actor_tx(&id, kind, name, normalize(roles), by, Ok(key))
+            .await
+    }
+
+    /// Start joining a workspace from this replica: generate the new actor's
+    /// key *here*, keep it in this key directory, and return a request —
+    /// nothing secret in it — for a human to `admit_actor` on a replica that
+    /// holds their key (PRD-v3 M6). Works on an empty replica.
+    pub fn request_actor(
+        &self,
+        kind: ActorKind,
+        name: &str,
+        roles: &[Role],
+    ) -> Result<ActorRequest> {
+        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let mut request = ActorRequest {
+            id: Uuid::new_v4().to_string(),
+            kind,
+            name: name.to_string(),
+            roles: normalize(roles),
+            pubkey: hex::encode(key.verifying_key().to_bytes()),
+            proof: String::new(),
+        };
+        request.proof = hex::encode(key.sign(&request.signable()).to_bytes());
+        self.keys.put(&request.id, &key.to_bytes())?;
+        Ok(request)
+    }
+
+    /// Admit a requested actor: a human (`by`, default the root) signs its
+    /// `actor.created`. The actor's secret key never comes here.
+    pub async fn admit_actor(&self, request: &ActorRequest, by: Option<&str>) -> Result<Actor> {
+        let bad = |why: &str| Error::InvalidRequest(why.to_string());
+        let pubkey: [u8; 32] = hex::decode(&request.pubkey)
+            .ok()
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| bad("malformed public key"))?;
+        let proof: [u8; 64] = hex::decode(&request.proof)
+            .ok()
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| bad("malformed proof"))?;
+        VerifyingKey::from_bytes(&pubkey)
+            .ok()
+            .and_then(|key| {
+                key.verify(&request.signable(), &Signature::from_bytes(&proof))
+                    .ok()
+            })
+            .ok_or_else(|| bad("it was changed after it was made, or not made by this key"))?;
+        let roles = normalize(&request.roles.0);
+        self.create_actor_tx(
+            &request.id,
+            request.kind,
+            &request.name,
+            roles,
+            by,
+            Err(pubkey),
+        )
+        .await
+    }
+
+    /// `key`: the new actor's secret (created here) or only its public key
+    /// (requested from elsewhere).
+    async fn create_actor_tx(
+        &self,
+        id: &str,
+        kind: ActorKind,
+        name: &str,
+        roles: Roles,
+        by: Option<&str>,
+        key: std::result::Result<SigningKey, [u8; 32]>,
+    ) -> Result<Actor> {
+        let id = id.to_string();
         let now = Utc::now();
-        let new_key = SigningKey::generate(&mut rand::rngs::OsRng);
-        let pubkey = new_key.verifying_key().to_bytes();
+        let pubkey = match &key {
+            Ok(secret) => secret.verifying_key().to_bytes(),
+            Err(pubkey) => *pubkey,
+        };
 
         let mut tx = self.begin_write().await?;
+        let taken: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM actors WHERE id = ?)")
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if taken {
+            return Err(Error::InvalidRequest("this actor already exists".into()));
+        }
         let root: Option<String> = match root_actor_tx(&mut tx).await? {
             Some(root) => Some(root),
             // Workspaces from before sprint 07 have no root event: their
@@ -218,15 +291,21 @@ impl Store {
             }
         };
         let (signer, signer_key) = match by.map(str::to_string).or(root) {
-            None => {
-                if kind != ActorKind::Human {
+            None => match &key {
+                Ok(secret) if kind == ActorKind::Human => (id.clone(), secret.clone()),
+                Ok(_) => {
                     return Err(Error::NotPermitted {
                         actor: name.to_string(),
                         action: "be the first actor: the workspace root must be human".into(),
                     });
                 }
-                (id.clone(), new_key.clone())
-            }
+                Err(_) => {
+                    return Err(Error::NotPermitted {
+                        actor: name.to_string(),
+                        action: "be admitted: this workspace has no root yet (`actor new`)".into(),
+                    });
+                }
+            },
             Some(signer) => {
                 let signer_kind: Option<ActorKind> =
                     sqlx::query_scalar("SELECT kind FROM actors WHERE id = ?")
@@ -264,7 +343,9 @@ impl Store {
             now,
         )
         .await?;
-        self.keys.put(&id, &new_key.to_bytes())?;
+        if let Ok(secret) = &key {
+            self.keys.put(&id, &secret.to_bytes())?;
+        }
         tx.commit().await?;
         Ok(Actor {
             id,
@@ -1399,6 +1480,11 @@ impl Store {
     pub async fn receive_bundle(&self, bundle: &SyncBundle) -> Result<Merge> {
         let mut merge = Merge::default();
         let mut tx = self.begin_write().await?;
+        sweep_expired_tx(&mut tx, Utc::now()).await?;
+        let held: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT id, task_id, actor_id FROM claims WHERE released_at IS NULL")
+                .fetch_all(&mut *tx)
+                .await?;
         for bytes in &bundle.events {
             match StoredEvent::decode(bytes) {
                 Ok(ev) => match insert_remote_tx(&mut tx, &ev, &mut merge.rejected_ids).await? {
@@ -1411,6 +1497,42 @@ impl Store {
             }
         }
         merge.rejected = merge.rejected_ids.len();
+        // Which live claims did this merge end (walkthrough F3)? An earlier
+        // claim from elsewhere winning the task, or a human's force-release —
+        // not the holder's own release or submission, and not expiry.
+        for (claim_id, task_id, actor_id) in held {
+            let ended: Option<ReleaseReason> =
+                sqlx::query_scalar("SELECT release_reason FROM claims WHERE id = ?")
+                    .bind(&claim_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            let reason = match ended {
+                Some(ReleaseReason::Forced) => "force_released",
+                Some(ReleaseReason::Released) => {
+                    let own: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM events
+                         WHERE task_id = ? AND actor_id = ? AND kind = 'claim.released'
+                           AND instr(payload, ?) > 0)",
+                    )
+                    .bind(&task_id)
+                    .bind(&actor_id)
+                    .bind(&claim_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if own {
+                        continue;
+                    }
+                    "superseded"
+                }
+                _ => continue,
+            };
+            merge.lost_claims.push(LostClaim {
+                task_id,
+                claim_id,
+                actor_id,
+                reason: reason.to_string(),
+            });
+        }
         tx.commit().await?;
         Ok(merge)
     }
@@ -1461,6 +1583,18 @@ async fn sweep_expired_tx(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+/// The roles as stored: in canonical order, and all of them when none given.
+fn normalize(roles: &[Role]) -> Roles {
+    Roles(if roles.is_empty() {
+        Role::ALL.to_vec()
+    } else {
+        Role::ALL
+            .into_iter()
+            .filter(|r| roles.contains(r))
+            .collect()
+    })
 }
 
 /// The workspace root: the actor whose self-signed `actor.created` is the
