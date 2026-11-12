@@ -1,0 +1,9 @@
+# U3 — a replica is told when a merge takes a claim away
+disconnected: x claims on A, bob claims on B; then B syncs
+both replicas agree the holder is: bob / bob
+B's sync output, lost_claims: []
+A's listener log, lost claims: 1 — claim lost in a sync from 6c64a29bc2 task=<id> actor=x reason=superseded
+$ A: task renew --actor x
+Error: task <id> is already claimed by bob
+bob holds another task; alice force-releases it on A; B syncs
+B's sync output, lost_claims: [{"actor_id":"bob","reason":"force_released"}]

@@ -47,6 +47,10 @@ winner and 19 clean `ClaimConflict` errors.
 | M4 | Dependencies and subtasks. `task.blocked` / `task.unblocked` events declare that a task waits for another; a subtask names its `parent` at creation. A task is claimable only when every blocker and every subtask is `done`; `claim_next` skips the rest. A dependency that would close a cycle (through blockers or subtasks) is refused. The dependency set is folded per task in log order, so concurrent edits converge. |
 | M5 | Roles on actors — `planner` (create tasks, edit dependencies and unclaimed tasks), `worker` (claim), `reviewer` (approve / reject) — fixed at creation and carried in the actor directory. An actor created without roles holds all three. The holder of a claim may always edit and submit its own task. |
 
+| M6 | Enrolment without moving a secret: `actor request` creates the new actor's key where it will be used and prints a signed request holding only public fields; a human runs `actor admit` on it. An actor's key never needs to leave the machine it was made on. |
+| M7 | Periodic sync: `p2p sync --every SECS` and `p2p listen --sync-every SECS` keep replicas current without a manual sync. |
+| M8 | Lost claims are reported: a merge lists the claims this replica held that it ended — superseded by an earlier claim, or force-released — in `Merge.lost_claims` (sync output) and in the listener's log. The holder's own release, a submission and expiry are not losses. |
+
 ## RSI preconditions
 
 Agents must not review each other unattended until these hold.
@@ -85,6 +89,7 @@ token decides who may connect and the rules above decide what a received event m
 | 05 | MCP server with `claim_next`: M3 | done |
 | 06 | Dependencies and roles: M4, M5 | done |
 | 07 | Keys and authority: R1–R5, A5, A6 | done |
+| 08 | Replicas in practice: M6–M8, CI | done (follows the LAN run in `walkthrough/uat-lan`, findings L3 and F3) |
 
 ## Deferred (unchanged from v2)
 

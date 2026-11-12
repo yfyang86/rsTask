@@ -103,10 +103,19 @@ rstask p2p listen --bind 0.0.0.0:7701        # host A: prints {"spec": "ID@host:
 rstask p2p sync ID@a.example:7701            # host B: two-way sync, remembers the peer
 rstask p2p sync                              # every known peer
 rstask p2p peer add ID@HOST:PORT; rstask p2p peer list; rstask p2p status
+rstask p2p sync --every 30                   # keep syncing; or: p2p listen --sync-every 30
 ```
 
 `RSTASK_P2P_RELAY` / `p2p.relay`: `default` (n0's public relays and DNS, dial by
 id alone), `disabled` (direct addresses only — LAN, tests), or your own relay
-URL. The node's network identity is `node.key` beside the database. To work on
-a second replica an actor's key file must be carried to that replica's key
-directory.
+URL. The node's network identity is `node.key` beside the database. A sync reports any
+claim it took away from this replica (`lost_claims`).
+
+To add an actor on another machine without moving a secret key:
+
+```sh
+rstask actor request bob --kind agent --role worker   # there: prints a request, keeps the key
+rstask actor admit '<request>'                        # here, as a human: signs bob's creation
+```
+
+After the next sync the new machine can act as `bob`.

@@ -201,6 +201,37 @@ pub struct TaskDetail {
     pub waiting_on: Vec<String>,
 }
 
+/// A request to join a workspace, made where the new actor's secret key will
+/// live and handed — it holds nothing secret — to a human who can admit it
+/// (PRD-v3 M6). `proof` is the new key's signature over the other fields, so
+/// a request cannot be altered on the way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActorRequest {
+    pub id: String,
+    pub kind: ActorKind,
+    pub name: String,
+    pub roles: Roles,
+    /// Hex Ed25519 public key.
+    pub pubkey: String,
+    /// Hex Ed25519 signature.
+    pub proof: String,
+}
+
+impl ActorRequest {
+    /// The bytes `proof` signs.
+    pub fn signable(&self) -> Vec<u8> {
+        let fields = (
+            "rstask actor request v1",
+            &self.id,
+            self.kind,
+            &self.name,
+            self.roles.to_string(),
+            &self.pubkey,
+        );
+        postcard::to_stdvec(&fields).expect("postcard encode")
+    }
+}
+
 /// A replica this one syncs with (PRD-v2 D1).
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct Peer {

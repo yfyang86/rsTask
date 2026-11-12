@@ -66,6 +66,9 @@ left out.
 - **U3 (LAN, two hosts) was not run** — this environment is one container. Everything
   else ran on loopback with the relay disabled, so NAT traversal, relay fallback and
   dialing by id alone (`relay = default`) are untested here.
+  *Update:* `walkthrough/uat-lan` has since run it over a real LAN address
+  (two replicas on one host, relay disabled): PASS. Two physical machines, NAT and
+  relays remain untested.
 - No daemon / always-on mode, no automatic periodic sync, no notification when a sync
   changes a task an agent holds (walkthrough F3).
 - No rate limiting or lockout on failed handshakes (cSharing's guard was not ported).

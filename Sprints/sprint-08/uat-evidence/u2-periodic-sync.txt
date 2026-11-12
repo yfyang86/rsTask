@@ -1,0 +1,9 @@
+# U2 — replicas keep each other current without anyone typing sync
+$ B: p2p sync --every 1 &        (A is still listening)
+alice files a task on A  -> on B's board after 0s
+bob claims it on B       -> A shows it in work after 1s
+B's sync loop printed (only rounds that moved something):
+  {"received":1,"sent":0}
+  {"received":0,"sent":1}
+sync loop stopped on SIGTERM: exit=0
+listener stopped on SIGTERM: exit=0

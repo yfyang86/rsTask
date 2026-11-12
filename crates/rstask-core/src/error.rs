@@ -48,6 +48,9 @@ pub enum Error {
     #[error("no signing key for actor {0} in this key directory")]
     NoSigningKey(String),
 
+    #[error("invalid actor request: {0}")]
+    InvalidRequest(String),
+
     #[error("key does not belong to actor {0}")]
     KeyMismatch(String),
 

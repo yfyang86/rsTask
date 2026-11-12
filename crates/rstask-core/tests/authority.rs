@@ -560,3 +560,84 @@ async fn a_legacy_workspace_has_its_secrets_moved_out_and_scrubbed() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- Sprint 08: enrolment without moving a secret (UAT U1) ----
+
+#[tokio::test]
+async fn an_actor_enrols_from_another_replica_without_its_key_moving() {
+    let a = store().await;
+    let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
+    let task = a.create_task("t", "", &alice.id).await.unwrap();
+    let b = store().await; // empty: has not even synced yet
+
+    let request = b
+        .request_actor(ActorKind::Agent, "bob", &[Role::Worker])
+        .unwrap();
+    // What travels is public: no secret in it.
+    let wire = serde_json::to_string(&request).unwrap();
+    assert!(!wire.contains(&hex::encode(b.export_key(&request.id).unwrap())));
+
+    let bob = a
+        .admit_actor(&serde_json::from_str(&wire).unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (bob.id.as_str(), bob.kind),
+        (request.id.as_str(), ActorKind::Agent)
+    );
+    assert_eq!(bob.roles.0, vec![Role::Worker]);
+    // A never held bob's key; the creation is signed by the root.
+    assert!(matches!(a.export_key(&bob.id), Err(Error::NoSigningKey(_))));
+    let signer: String = sqlx::query_scalar(
+        "SELECT actor_id FROM events WHERE kind = 'actor.created' AND task_id = ?",
+    )
+    .bind(&bob.id)
+    .fetch_one(a.pool())
+    .await
+    .unwrap();
+    assert_eq!(signer, alice.id);
+
+    // B learns of its own admission by sync and can then act; A accepts it.
+    exchange(&a, &b).await;
+    b.claim_task(&task.id, &bob.id, TTL).await.unwrap();
+    exchange(&b, &a).await;
+    assert_eq!(
+        a.task_detail(&task.id)
+            .await
+            .unwrap()
+            .claim
+            .unwrap()
+            .actor_id,
+        bob.id
+    );
+}
+
+#[tokio::test]
+async fn a_request_must_be_intact_and_cannot_found_a_workspace() {
+    let a = store().await;
+    let b = store().await;
+    let request = b.request_actor(ActorKind::Agent, "bob", &[]).unwrap();
+
+    // Admission needs a root to sign it.
+    let err = a.admit_actor(&request, None).await.unwrap_err();
+    assert!(matches!(err, Error::NotPermitted { .. }), "got {err:?}");
+    let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
+    let bot = a.create_actor(ActorKind::Agent, "bot").await.unwrap();
+
+    // Edited after it was made: a worker's request turned into a human's.
+    let mut forged = request.clone();
+    forged.kind = ActorKind::Human;
+    let err = a.admit_actor(&forged, None).await.unwrap_err();
+    assert!(matches!(err, Error::InvalidRequest(_)), "got {err:?}");
+    let mut forged = request.clone();
+    forged.pubkey = hex::encode([7u8; 32]);
+    let err = a.admit_actor(&forged, None).await.unwrap_err();
+    assert!(matches!(err, Error::InvalidRequest(_)), "got {err:?}");
+
+    // Only a human admits; and an id is admitted once.
+    let err = a.admit_actor(&request, Some(&bot.id)).await.unwrap_err();
+    assert!(matches!(err, Error::NotPermitted { .. }), "got {err:?}");
+    a.admit_actor(&request, Some(&alice.id)).await.unwrap();
+    let err = a.admit_actor(&request, None).await.unwrap_err();
+    assert!(matches!(err, Error::InvalidRequest(_)), "got {err:?}");
+}

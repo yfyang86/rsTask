@@ -71,6 +71,9 @@ enum P2pCommand {
         /// `p2p.bind`, or a random port).
         #[arg(long)]
         bind: Option<std::net::SocketAddr>,
+        /// Also dial every known peer every SECS seconds.
+        #[arg(long, value_name = "SECS")]
+        sync_every: Option<u64>,
     },
     /// Remember peers to sync with.
     Peer {
@@ -79,7 +82,13 @@ enum P2pCommand {
     },
     /// Two-way sync with one peer (`ID` or `ID@host:port`), or with every
     /// known peer.
-    Sync { peer: Option<String> },
+    Sync {
+        peer: Option<String>,
+        /// Keep syncing every SECS seconds until interrupted; prints a line
+        /// only when something moved, a claim was lost, or a peer failed.
+        #[arg(long, value_name = "SECS")]
+        every: Option<u64>,
+    },
     /// This node's id, relay mode and known peers.
     Status,
 }
@@ -119,6 +128,25 @@ enum ActorCommand {
     },
     Heartbeat {
         id: String,
+    },
+    /// Ask to join a workspace from this machine: creates the new actor's
+    /// key in this key directory and prints a request (nothing secret in it)
+    /// for a human to pass to `actor admit` where their key is.
+    Request {
+        name: String,
+        #[arg(long, value_enum, default_value = "agent")]
+        kind: KindArg,
+        /// Roles asked for (repeatable); none given means all.
+        #[arg(long = "role", value_enum)]
+        roles: Vec<RoleArg>,
+    },
+    /// Admit a requested actor: sign its creation as a human. REQUEST is the
+    /// JSON printed by `actor request`, or `-` to read it from stdin.
+    Admit {
+        request: String,
+        /// The admitting human (default: the workspace root).
+        #[arg(long)]
+        by: Option<String>,
     },
 }
 
@@ -263,7 +291,9 @@ impl From<StatusArg> for TaskStatus {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // stdout carries the command's output (JSON, bundles): logs go to stderr.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
@@ -290,18 +320,8 @@ async fn main() -> anyhow::Result<()> {
                 roles,
                 by,
             } => {
-                let kind = match kind {
-                    KindArg::Human => ActorKind::Human,
-                    KindArg::Agent => ActorKind::Agent,
-                };
-                let roles: Vec<Role> = roles
-                    .into_iter()
-                    .map(|r| match r {
-                        RoleArg::Planner => Role::Planner,
-                        RoleArg::Worker => Role::Worker,
-                        RoleArg::Reviewer => Role::Reviewer,
-                    })
-                    .collect();
+                let kind = to_kind(kind);
+                let roles = to_roles(roles);
                 let actor = store
                     .provision_actor(kind, &name, &roles, by.as_deref())
                     .await?;
@@ -309,6 +329,21 @@ async fn main() -> anyhow::Result<()> {
             }
             ActorCommand::Heartbeat { id } => {
                 store.heartbeat(&id).await?;
+            }
+            ActorCommand::Request { name, kind, roles } => {
+                let request = store.request_actor(to_kind(kind), &name, &to_roles(roles))?;
+                println!("{}", serde_json::to_string(&request)?);
+            }
+            ActorCommand::Admit { request, by } => {
+                let request = if request == "-" {
+                    std::io::read_to_string(std::io::stdin())?
+                } else {
+                    request
+                };
+                let request = serde_json::from_str(&request)
+                    .map_err(|e| anyhow::anyhow!("not an actor request: {e}"))?;
+                let actor = store.admit_actor(&request, by.as_deref()).await?;
+                println!("{}", serde_json::to_string_pretty(&actor)?);
             }
         },
         Command::Task { command } => match command {
@@ -429,15 +464,18 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::P2p { command } => match command {
-            P2pCommand::Listen { bind } => {
-                let node = start_node(&cfg.p2p, &node_key, store, bind).await?;
+            P2pCommand::Listen { bind, sync_every } => {
+                let node = start_node(&cfg.p2p, &node_key, store.clone(), bind).await?;
                 let spec = serde_json::json!({
                     "node": node.id().to_string(),
                     "spec": node.peer_spec().to_string(),
                     "relay": cfg.p2p.relay,
                 });
                 println!("{spec}");
-                stop_signal().await?;
+                match sync_every {
+                    Some(secs) => sync_until_stopped(&node, &store, None, secs).await?,
+                    None => stop_signal().await?,
+                }
                 node.shutdown().await;
             }
             P2pCommand::Peer { command } => match command {
@@ -454,35 +492,22 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             },
-            P2pCommand::Sync { peer } => {
-                let peers: Vec<PeerSpec> = match peer {
-                    Some(spec) => vec![spec.parse()?],
-                    None => {
-                        let mut known = Vec::new();
-                        for p in store.list_peers().await? {
-                            known.push(format!("{}@{}", p.id, p.addrs).parse()?);
-                        }
-                        known
-                    }
-                };
+            P2pCommand::Sync { peer, every } => {
+                let peer: Option<PeerSpec> = peer.map(|spec| spec.parse()).transpose()?;
                 anyhow::ensure!(
-                    !peers.is_empty(),
+                    peer.is_some() || !store.list_peers().await?.is_empty(),
                     "no peers: `rstask p2p peer add ID@HOST:PORT`"
                 );
-                let node = start_node(&cfg.p2p, &node_key, store, None).await?;
-                let mut failed = 0;
-                for peer in &peers {
-                    let outcome = match node.sync_with(peer).await {
-                        Ok(stats) => serde_json::json!({ "peer": peer.to_string(), "ok": stats }),
-                        Err(e) => {
-                            failed += 1;
-                            serde_json::json!({ "peer": peer.to_string(), "error": e.to_string() })
-                        }
-                    };
-                    println!("{outcome}");
-                }
+                let node = start_node(&cfg.p2p, &node_key, store.clone(), None).await?;
+                let failed = match every {
+                    Some(secs) => {
+                        sync_until_stopped(&node, &store, peer.as_ref(), secs).await?;
+                        0
+                    }
+                    None => sync_round(&node, &store, peer.as_ref(), false).await?,
+                };
                 node.shutdown().await;
-                anyhow::ensure!(failed == 0, "{failed} of {} peers failed", peers.len());
+                anyhow::ensure!(failed == 0, "{failed} peer(s) failed");
             }
             P2pCommand::Status => {
                 let status = serde_json::json!({
@@ -496,6 +521,91 @@ async fn main() -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+fn to_kind(kind: KindArg) -> ActorKind {
+    match kind {
+        KindArg::Human => ActorKind::Human,
+        KindArg::Agent => ActorKind::Agent,
+    }
+}
+
+fn to_roles(roles: Vec<RoleArg>) -> Vec<Role> {
+    roles
+        .into_iter()
+        .map(|r| match r {
+            RoleArg::Planner => Role::Planner,
+            RoleArg::Worker => Role::Worker,
+            RoleArg::Reviewer => Role::Reviewer,
+        })
+        .collect()
+}
+
+/// Sync with `peer`, or with every known peer, one after another. Prints one
+/// JSON line per peer — with `quiet`, only when something moved, a claim was
+/// lost or the peer failed. Returns how many peers failed.
+async fn sync_round(
+    node: &Node,
+    store: &Store,
+    peer: Option<&PeerSpec>,
+    quiet: bool,
+) -> anyhow::Result<usize> {
+    let peers: Vec<PeerSpec> = match peer {
+        Some(peer) => vec![peer.clone()],
+        None => {
+            let mut known = Vec::new();
+            for p in store.list_peers().await? {
+                known.push(format!("{}@{}", p.id, p.addrs).parse()?);
+            }
+            known
+        }
+    };
+    let mut failed = 0;
+    for peer in &peers {
+        match node.sync_with(peer).await {
+            Ok(stats) => {
+                let moved = stats.received.added > 0
+                    || stats.sent > 0
+                    || !stats.received.lost_claims.is_empty();
+                if moved || !quiet {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "peer": peer.to_string(), "ok": stats })
+                    );
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                println!(
+                    "{}",
+                    serde_json::json!({ "peer": peer.to_string(), "error": e.to_string() })
+                );
+            }
+        }
+    }
+    Ok(failed)
+}
+
+/// `sync_round` every `secs` seconds until Ctrl-C / SIGTERM. A peer that is
+/// down is reported and tried again next round.
+async fn sync_until_stopped(
+    node: &Node,
+    store: &Store,
+    peer: Option<&PeerSpec>,
+    secs: u64,
+) -> anyhow::Result<()> {
+    let stop = stop_signal();
+    tokio::pin!(stop);
+    let rounds = async {
+        loop {
+            sync_round(node, store, peer, true).await?;
+            tokio::time::sleep(Duration::from_secs(secs.max(1))).await;
+        }
+    };
+    tokio::select! {
+        stopped = &mut stop => stopped,
+        failed = rounds => failed,
+    }
 }
 
 /// Wait for Ctrl-C or, on Unix, SIGTERM — a listener started in the

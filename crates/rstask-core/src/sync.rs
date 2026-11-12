@@ -29,6 +29,20 @@ pub struct Merge {
     pub rejected: usize,
     /// Human-readable reasons, for CLI output and UAT evidence.
     pub rejected_ids: Vec<String>,
+    /// Claims this replica held as live that the merge ended.
+    pub lost_claims: Vec<LostClaim>,
+}
+
+/// A claim that was live here before a merge and is not after it — because
+/// an earlier claim from elsewhere won the task, or a human force-released
+/// it. The holder's own release or submission is not a loss.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LostClaim {
+    pub task_id: String,
+    pub claim_id: String,
+    pub actor_id: String,
+    /// `superseded` or `force_released`.
+    pub reason: String,
 }
 
 /// Full-state sync unit: `rstask sync export|import` today, the payload of the
