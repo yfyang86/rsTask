@@ -1,0 +1,128 @@
+# LAN hello-world — relay disabled, B dials A's LAN address (192.168.8.2)
+# workspace token: shared; replicas: /tmp/rstask-uat-lan/{a,b}
+
+# A: init, alice (human root), the hello-world task
+$ rstask init
+initialized /tmp/rstask-uat-lan/a/a.sqlite
+
+$ rstask actor new alice --kind human
+{
+  "id": "ffc554e3-b582-49f9-8d71-39c6744648ca",
+  "kind": "human",
+  "name": "alice",
+  "created_at": "2026-11-12T04:30:02.364297Z",
+  "last_heartbeat_at": null,
+  "roles": [
+    "planner",
+    "worker",
+    "reviewer"
+  ]
+}
+
+$ rstask task new "hello world over LAN" --actor alice
+{
+  "id": "60eae084-d7ca-40e1-8adc-aa7f7c7c655c",
+  "title": "hello world over LAN",
+  "body_md": "",
+  "status": "queue",
+  "priority": 0,
+  "created_by": "ffc554e3-b582-49f9-8d71-39c6744648ca",
+  "created_at": "2026-11-12T04:30:02.383506Z",
+  "updated_at": "2026-11-12T04:30:02.383506Z",
+  "parent_id": null,
+  "protected": false
+}
+
+# A: provision bob (agent) for B — the actor event crosses via sync,
+#    the secret key file is carried by hand (never over the wire)
+$ rstask actor new bob --kind agent --by alice
+{
+  "id": "71174419-9424-4934-9d54-31b1ec16bf7e",
+  "kind": "agent",
+  "name": "bob",
+  "created_at": "2026-11-12T04:30:02.401996Z",
+  "last_heartbeat_at": null,
+  "roles": [
+    "planner",
+    "worker",
+    "reviewer"
+  ]
+}
+
+carried: a/keys/71174419-9424-4934-9d54-31b1ec16bf7e.key -> b/keys/
+
+# A: serving (note the bind address is 0.0.0.0 — reachable from the LAN)
+$ rstask p2p listen --bind 0.0.0.0:7701
+{"node":"43424804f5c8088f24091364574b4b21fc4b3b53101593989b664168a7cb767f","relay":"disabled","spec":"43424804f5c8088f24091364574b4b21fc4b3b53101593989b664168a7cb767f@192.168.8.2:7701"}
+
+# B: init empty, then dial A BY ITS LAN ADDRESS: 43424804f5c8088f24091364574b4b21fc4b3b53101593989b664168a7cb767f@192.168.8.2:7701
+$ rstask init
+initialized /tmp/rstask-uat-lan/b/b.sqlite
+
+$ rstask p2p sync 43424804f5c8088f24091364574b4b21fc4b3b53101593989b664168a7cb767f@192.168.8.2:7701
+{"ok":{"received":{"added":3,"duplicates":0,"pending":0,"rejected":0,"rejected_ids":[]},"refused_by_peer":0,"sent":0},"peer":"43424804f5c8088f24091364574b4b21fc4b3b53101593989b664168a7cb767f@192.168.8.2:7701"}
+(exit 0)
+
+# B's board — the hello-world task arrived over the LAN:
+$ rstask board
+
+== queue (1) ==
+id        status    prio   title
+60eae084  queue  0      hello world over LAN
+
+== work (0) ==
+(no tasks)
+
+== review (0) ==
+(no tasks)
+
+== done (0) ==
+(no tasks)
+
+# B writes back: bob claims the task (signs with the carried key)
+$ rstask task claim 60eae084-d7ca-40e1-8adc-aa7f7c7c655c --actor bob
+{
+  "id": "692af952-76d5-40b0-97e9-e4b0c7d40230",
+  "task_id": "60eae084-d7ca-40e1-8adc-aa7f7c7c655c",
+  "actor_id": "71174419-9424-4934-9d54-31b1ec16bf7e",
+  "claimed_at": "2026-11-12T04:30:02.683202Z",
+  "expires_at": "2026-11-12T04:45:02.683202Z",
+  "released_at": null,
+  "release_reason": null
+}
+(exit 0)
+
+# B: sync again (no argument = every known peer); A learns the claim
+$ rstask p2p sync
+{"ok":{"received":{"added":0,"duplicates":0,"pending":0,"rejected":0,"rejected_ids":[]},"refused_by_peer":0,"sent":1},"peer":"43424804f5c8088f24091364574b4b21fc4b3b53101593989b664168a7cb767f@192.168.8.2:7701"}
+(exit 0)
+
+# convergence checks
+A heads: ["f513e28aedd3e933e622ba52b59ebb96fc49e1ae93d70ee61da51e056a1c6d69"]
+B heads: ["f513e28aedd3e933e622ba52b59ebb96fc49e1ae93d70ee61da51e056a1c6d69"]
+heads identical:  yes
+boards identical: yes
+$ rstask board   (on A — hello world claimed by bob)
+
+== queue (0) ==
+(no tasks)
+
+== work (1) ==
+id        status    prio   title
+60eae084  work  0      hello world over LAN
+
+== review (0) ==
+(no tasks)
+
+== done (0) ==
+(no tasks)
+
+# re-sync moves nothing (received.added = 0 both ways)
+$ rstask p2p sync
+{"ok":{"received":{"added":0,"duplicates":0,"pending":0,"rejected":0,"rejected_ids":[]},"refused_by_peer":0,"sent":0},"peer":"43424804f5c8088f24091364574b4b21fc4b3b53101593989b664168a7cb767f@192.168.8.2:7701"}
+
+# event chain of the hello-world task, identical on both replicas:
+A: ["task.created","task.claimed"]
+B: ["task.created","task.claimed"]
+
+# PASS: B reached A at 192.168.8.2:7701, state converged both ways
