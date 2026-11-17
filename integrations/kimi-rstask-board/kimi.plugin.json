@@ -1,0 +1,21 @@
+{
+  "name": "rstask-board",
+  "version": "0.1.0",
+  "description": "Read-only RsTask kanban board for the current workspace, provided through MCP and a slash command",
+  "license": "Apache-2.0",
+  "commands": "./commands/",
+  "skills": "./skills/",
+  "sessionStart": {
+    "skill": "rstask-board"
+  },
+  "mcpServers": {
+    "rstask-board": {
+      "command": "node",
+      "args": ["./mcp/rstask-board.mjs"]
+    }
+  },
+  "interface": {
+    "displayName": "RsTask Board",
+    "shortDescription": "Read-only WORK / REVIEW / QUEUE / DONE board for the current workspace"
+  }
+}
