@@ -1,6 +1,6 @@
-# RsTask Board for Kimi Code
+# RsTasks Board for Kimi Code
 
-Read-only Kimi Code plugin that shows the current workspace's RsTask kanban board: **WORK / REVIEW / QUEUE / DONE**, claim holders (`@actor`), and unfinished dependency blockers (`⛔n`). It is adapted from `integrations/claude-code/rstask-board` for Kimi's native plugin, MCP, Skill, and slash-command interfaces.
+Read-only Kimi Code plugin that shows the current workspace's RsTasks kanban board: **WORK / REVIEW / QUEUE / DONE**, claim holders (`@actor`), and unfinished dependency blockers (`⛔n`). It is adapted from `integrations/claude-code/rstask-board` for Kimi's native plugin, MCP, Skill, and slash-command interfaces.
 
 ## Behavior
 
@@ -8,6 +8,10 @@ Read-only Kimi Code plugin that shows the current workspace's RsTask kanban boar
 - Executes `sqlite3 -readonly -json` with the same task/holder/blocker query as the Claude Code integration.
 - Never mutates tasks, claims, dependencies, the event store, or actor keys.
 - Requires Node.js 22.19+ and `sqlite3` on `PATH`; no npm runtime dependencies.
+
+The integration does not invoke the `rstasks` binary. The `.rstask` directory,
+`rstask-board` identifiers, `/rstask-board:board` command, and `rstask_board` MCP
+tool name retain their existing names for compatibility.
 
 ## Install
 
@@ -39,7 +43,7 @@ node mcp/rstask-board-cli.mjs --path /path/to/workspace --json
 npm test
 ```
 
-Tests create temporary SQLite boards and verify database selection, read-only behavior, holder/blocker formatting, MCP initialize/list/call behavior, the direct CLI, and manifest resources. No live RsTask workspace or model call is required.
+Tests create temporary SQLite boards and verify database selection, read-only behavior, holder/blocker formatting, MCP initialize/list/call behavior, the direct CLI, and manifest resources. No live RsTasks workspace or model call is required.
 
 ## Notes
 

@@ -1,5 +1,5 @@
 ---
-description: Show the current workspace's read-only RsTask kanban board
+description: Show the current workspace's read-only RsTasks kanban board
 ---
 
 Use the plugin's `rstask_board` MCP tool to read the board for the current workspace. If the user supplied a directory as arguments, use that directory as the tool's `path`; otherwise omit `path` to use the current workspace.

@@ -3,8 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Board, Task } from '../types'
 
-// The board is the session folder's rstask workspace: the most recently modified
-// .rstask/*.sqlite (rstask's default is rstask.sqlite; a workspace may name its own).
+// The board is the session folder's rstasks workspace: the most recently modified
+// .rstask/*.sqlite (rstasks' default is rstask.sqlite; a workspace may name its own).
 // Read-only access through sqlite3.
 const PANE = 'rstask-board'
 const REFRESH_MS = 15_000
@@ -48,17 +48,17 @@ async function refresh($: EngineInterface): Promise<void> {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'rstask', description: 'Show this folder\'s rstask kanban board in the sidebar' })
+    await $.command.register({ name: 'rstask', description: 'Show this folder\'s rstasks kanban board in the sidebar' })
     await refresh($)
     $.clock.every(REFRESH_MS, () => void refresh($))
-    void $.ui.open({ id: PANE, title: 'rstask board' })
+    void $.ui.open({ id: PANE, title: 'rstasks board' })
     return next(e)
   })
 
   on('command.run', { command: 'rstask' }, async $ => {
     await refresh($)
-    await $.ui.open({ id: PANE, title: 'rstask board' })
-    return { text: 'rstask board opened (refreshes every 15s).' }
+    await $.ui.open({ id: PANE, title: 'rstasks board' })
+    return { text: 'rstasks board opened (refreshes every 15s).' }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -81,7 +81,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        {b.error && <Text color="red">{cut(`rstask: ${b.error}`, width)}</Text>}
+        {b.error && <Text color="red">{cut(`rstasks: ${b.error}`, width)}</Text>}
         {ORDER.map(s => {
           const list = by[s] ?? []
           const shown = s === 'done' ? list.slice(0, DONE_SHOWN) : list

@@ -39,7 +39,7 @@ async function handle(line) {
     return writeResult(id, {
       tools: [{
         name: "rstask_board",
-        description: "Read the current workspace's RsTask board from the newest .rstask/*.sqlite database without modifying it",
+        description: "Read the current workspace's RsTasks board from the newest .rstask/*.sqlite database without modifying it",
         inputSchema: {
           type: "object",
           properties: {

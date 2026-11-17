@@ -1,11 +1,11 @@
 ---
 name: rstask-board
-description: Read and explain the current workspace's RsTask kanban board without changing tasks, claims, or actor keys
+description: Read and explain the current workspace's RsTasks kanban board without changing tasks, claims, or actor keys
 type: prompt
-whenToUse: When the user asks for RsTask status, work/review/queue/done tasks, claim holders, blockers, or a board refresh
+whenToUse: When the user asks for RsTasks status, work/review/queue/done tasks, claim holders, blockers, or a board refresh
 ---
 
-Use the plugin's `rstask_board` MCP tool as the authoritative source for RsTask board state. It finds the most recently modified `.rstask/*.sqlite` database in the requested workspace and reads it with `sqlite3 -readonly -json`.
+Use the plugin's `rstask_board` MCP tool as the authoritative source for RsTasks board state. It finds the most recently modified `.rstask/*.sqlite` database in the requested workspace and reads it with `sqlite3 -readonly -json`.
 
 - WORK / REVIEW / QUEUE / DONE are displayed in that order.
 - `@actor` identifies the current claim holder.
