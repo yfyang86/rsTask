@@ -25,6 +25,10 @@ cargo run -p rstask-cli -- task claim "$TASK" --actor "$ACTOR"
 cargo run -p rstask-cli -- task submit "$TASK" --actor "$ACTOR"
 cargo run -p rstask-cli -- task approve "$TASK" --actor "$ACTOR"
 cargo run -p rstask-cli -- board
+
+## Another example with tui or API
+export DB=.rstask/typecraft.sqlite && RSTASK_STORAGE_DB_PATH="$DB" rstask-server
+curl -s http://127.0.0.1:7700/api/board | jq
 ```
 
 ## Invariants (enforced in rstask-core, regardless of interface)
