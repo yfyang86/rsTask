@@ -1,6 +1,6 @@
 import { readBoard } from "./board.mjs";
 
-const SERVER_INFO = { name: "rstask-board", version: "0.1.0" };
+const SERVER_INFO = { name: "rstask-board", version: "0.1.1" };
 let buffer = "";
 let chain = Promise.resolve();
 
