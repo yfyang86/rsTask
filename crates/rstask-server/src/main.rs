@@ -1,4 +1,4 @@
-//! rstask-server — local REST API (Axum).
+//! rstasks-server — local REST API (Axum).
 //!
 //! Read-only for now (Web dashboard): exposing mutation routes would bypass
 //! the claim/workflow invariants only where they are enforced — in core —
@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::Json, routing::get, Router};
-use rstask_core::{Config, Store, Task, TaskStatus};
+use rstasks_core::{Config, Store, Task, TaskStatus};
 use serde::Serialize;
 
 #[derive(Clone)]
@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], cfg.server.port));
-    tracing::info!(%addr, "rstask-server listening");
+    tracing::info!(%addr, "rstasks-server listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -73,7 +73,7 @@ async fn get_task(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<Task>, StatusCode> {
     st.store.get_task(&id).await.map(Json).map_err(|e| match e {
-        rstask_core::Error::TaskNotFound(_) => StatusCode::NOT_FOUND,
+        rstasks_core::Error::TaskNotFound(_) => StatusCode::NOT_FOUND,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     })
 }

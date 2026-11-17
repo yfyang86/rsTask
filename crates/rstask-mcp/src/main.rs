@@ -1,9 +1,9 @@
-//! rstask-mcp — MCP server exposing agent tools over the shared core.
+//! rstasks-mcp — MCP server exposing agent tools over the shared core.
 //!
 //! One server process per agent, over stdio. The actor is fixed at startup
 //! (`--actor` or `RSTASK_ACTOR`); no tool takes an actor argument, so an agent
 //! cannot act as someone else through this interface. Every tool calls
-//! `rstask_core::Store`, so claim TTL, the workflow gate and the event log
+//! `rstasks_core::Store`, so claim TTL, the workflow gate and the event log
 //! hold for agents exactly as they do for humans.
 
 use std::path::PathBuf;
@@ -13,11 +13,14 @@ use clap::Parser;
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt};
-use rstask_core::{Actor, Config, Store, Submission, TaskStatus};
+use rstasks_core::{Actor, Config, Store, Submission, TaskStatus};
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
-#[command(name = "rstask-mcp", about = "RsTask MCP server for one agent (stdio)")]
+#[command(
+    name = "rstasks-mcp",
+    about = "RsTasks MCP server for one agent (stdio)"
+)]
 struct Cli {
     /// The actor this server acts as (or env RSTASK_ACTOR).
     #[arg(long)]
@@ -148,7 +151,7 @@ fn ttl(secs: Option<u64>) -> Duration {
 
 /// Core results become tool results: JSON text on success, core's own
 /// message as a tool error otherwise.
-fn reply<T: Serialize>(result: rstask_core::Result<T>) -> CallToolResult {
+fn reply<T: Serialize>(result: rstasks_core::Result<T>) -> CallToolResult {
     match result.map(|v| serde_json::to_string_pretty(&v)) {
         Ok(Ok(json)) => CallToolResult::success(vec![ContentBlock::text(json)]),
         Ok(Err(e)) => CallToolResult::error(vec![ContentBlock::text(e.to_string())]),
@@ -349,7 +352,7 @@ impl ServerHandler for Server {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(format!(
-                "RsTask workspace. You act as {:?} actor \"{}\" ({}), roles: {}. \
+                "RsTasks workspace. You act as {:?} actor \"{}\" ({}), roles: {}. \
                  Planner: task_create (parent for subtasks), task_block, task_update, task_protect. \
                  Worker: claim_next -> task_renew while working -> task_complete. \
                  Reviewer: tasks_list status=review -> task_get -> task_approve or task_reject.",

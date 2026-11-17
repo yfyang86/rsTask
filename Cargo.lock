@@ -3286,20 +3286,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "rstask-cli"
+name = "rstasks"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "hex",
- "rstask-core",
+ "rstasks-core",
  "serde_json",
  "tokio",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "rstask-core"
+name = "rstasks-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
@@ -3320,25 +3320,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "rstask-mcp"
+name = "rstasks-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "rmcp",
- "rstask-core",
+ "rstasks-core",
  "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "rstask-server"
+name = "rstasks-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "rstask-core",
+ "rstasks-core",
  "serde",
  "tokio",
  "tracing",
@@ -3346,13 +3346,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "rstask-tui"
+name = "rstasks-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
  "ratatui",
- "rstask-core",
+ "rstasks-core",
  "tokio",
 ]
 

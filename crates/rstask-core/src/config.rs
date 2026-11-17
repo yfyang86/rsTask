@@ -49,7 +49,7 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct P2pConfig {
-    /// Reserved: the `rstask p2p` commands are the switch.
+    /// Reserved: the `rstasks p2p` commands are the switch.
     pub enabled: bool,
     pub transport: String,
     /// `default` (n0 public relays), `disabled` (direct only), or a relay URL.

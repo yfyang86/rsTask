@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use rstask_core::{ActorKind, Error, Role, Store, Submission, TaskStatus};
+use rstasks_core::{ActorKind, Error, Role, Store, Submission, TaskStatus};
 
 async fn setup() -> (Store, String) {
     let store = Store::open_in_memory().await.unwrap();
@@ -310,7 +310,7 @@ async fn only_humans_force_release() {
 
 // ---- Sprint 04: claim liveness and handoff (UAT U1–U4) ----
 
-async fn active_claim(store: &Store, task_id: &str) -> Option<rstask_core::Claim> {
+async fn active_claim(store: &Store, task_id: &str) -> Option<rstasks_core::Claim> {
     sqlx::query_as("SELECT * FROM claims WHERE task_id = ? AND released_at IS NULL")
         .bind(task_id)
         .fetch_optional(store.pool())
@@ -474,7 +474,7 @@ async fn claim_next_takes_highest_priority_then_oldest() {
 
 #[tokio::test]
 async fn claim_next_race_hands_out_distinct_tasks() {
-    let path = std::env::temp_dir().join(format!("rstask-race-{}.sqlite", uuid::Uuid::new_v4()));
+    let path = std::env::temp_dir().join(format!("rstasks-race-{}.sqlite", uuid::Uuid::new_v4()));
     let store = std::sync::Arc::new(Store::open(&path).await.unwrap());
     let alice = store.create_actor(ActorKind::Human, "alice").await.unwrap();
     for i in 0..3 {
@@ -594,7 +594,7 @@ async fn task_detail_carries_claim_and_handoff() {
 
 #[tokio::test]
 async fn concurrent_writers_never_see_a_locked_database() {
-    let path = std::env::temp_dir().join(format!("rstask-busy-{}.sqlite", uuid::Uuid::new_v4()));
+    let path = std::env::temp_dir().join(format!("rstasks-busy-{}.sqlite", uuid::Uuid::new_v4()));
     let store = std::sync::Arc::new(Store::open(&path).await.unwrap());
     let alice = store.create_actor(ActorKind::Human, "alice").await.unwrap();
     let bot = store.create_actor(ActorKind::Agent, "bot").await.unwrap();

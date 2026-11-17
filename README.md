@@ -1,4 +1,4 @@
-# RsTask
+# RsTasks
 
 Local-first, Markdown-native task workspace for humans and AI agents.
 CLI/TUI/Web for humans, MCP for agents. One core, one SQLite DB, Markdown for content.
@@ -7,31 +7,41 @@ CLI/TUI/Web for humans, MCP for agents. One core, one SQLite DB, Markdown for co
 
 ```
 crates/
-  rstask-core    Models, SQLite storage, actor/claim/event semantics — the single writer
-  rstask-cli     `rstask` binary (clap) — scriptable human ops
-  rstask-tui     ratatui kanban view (skeleton)
-  rstask-server  axum REST — read-only dashboard API (skeleton)
-  rstask-mcp     MCP server (rmcp, stdio) — one process per agent
+  rstask-core    `rstasks-core` package: models, SQLite storage, actor/claim/event semantics
+  rstask-cli     `rstasks` package and binary (clap) — scriptable human ops
+  rstask-tui     `rstasks-tui` ratatui kanban view (skeleton)
+  rstask-server  `rstasks-server` axum REST — read-only dashboard API (skeleton)
+  rstask-mcp     `rstasks-mcp` MCP server (rmcp, stdio) — one process per agent
 ```
+
+## Install from crates.io
+
+```sh
+cargo install rstasks
+cargo install rstasks-mcp rstasks-server rstasks-tui
+```
+
+The `RSTASK_*` environment variables and `.rstask` workspace directory retain
+their existing names for compatibility.
 
 ## Quick start
 
 ```sh
 cargo build --workspace
-cargo run -p rstask-cli -- init
-ACTOR=$(cargo run -q -p rstask-cli -- actor new alice --kind human | jq -r .id)
-TASK=$(cargo run -q -p rstask-cli -- task new "hello world" --actor "$ACTOR" | jq -r .id)
-cargo run -p rstask-cli -- task claim "$TASK" --actor "$ACTOR"
-cargo run -p rstask-cli -- task submit "$TASK" --actor "$ACTOR"
-cargo run -p rstask-cli -- task approve "$TASK" --actor "$ACTOR"
-cargo run -p rstask-cli -- board
+cargo run -p rstasks -- init
+ACTOR=$(cargo run -q -p rstasks -- actor new alice --kind human | jq -r .id)
+TASK=$(cargo run -q -p rstasks -- task new "hello world" --actor "$ACTOR" | jq -r .id)
+cargo run -p rstasks -- task claim "$TASK" --actor "$ACTOR"
+cargo run -p rstasks -- task submit "$TASK" --actor "$ACTOR"
+cargo run -p rstasks -- task approve "$TASK" --actor "$ACTOR"
+cargo run -p rstasks -- board
 
 ## Another example with tui or API
-export DB=.rstask/typecraft.sqlite && RSTASK_STORAGE_DB_PATH="$DB" rstask-server
+export DB=.rstask/typecraft.sqlite && RSTASK_STORAGE_DB_PATH="$DB" rstasks-server
 curl -s http://127.0.0.1:7700/api/board | jq
 ```
 
-## Invariants (enforced in rstask-core, regardless of interface)
+## Invariants (enforced in rstasks-core, regardless of interface)
 
 - **Claim = atomic lock with TTL.** At most one active claim per task; the
   holder extends it with `task renew`; stale claims are swept on every read
@@ -60,13 +70,13 @@ Each agent runs its own server; the actor is fixed at startup, so no tool takes
 an actor argument.
 
 ```sh
-BOT=$(rstask actor new bot --kind agent | jq -r .id)   # signed by the root human
+BOT=$(rstasks actor new bot --kind agent | jq -r .id)   # signed by the root human
 mkdir -p ~/agents/bot && mv .rstask/keys/$BOT.key ~/agents/bot/
-rstask-mcp --actor "$BOT" --keys ~/agents/bot   # or RSTASK_ACTOR / RSTASK_AUTH_KEY_DIR
+rstasks-mcp --actor "$BOT" --keys ~/agents/bot   # or RSTASK_ACTOR / RSTASK_AUTH_KEY_DIR
 ```
 
 ```json
-{ "mcpServers": { "rstask": { "command": "rstask-mcp", "args": ["--db", "/path/to/rstask.sqlite", "--keys", "/path/to/agents/bot", "--actor", "<actor id>"] } } }
+{ "mcpServers": { "rstasks": { "command": "rstasks-mcp", "args": ["--db", "/path/to/rstask.sqlite", "--keys", "/path/to/agents/bot", "--actor", "<actor id>"] } } }
 ```
 
 Tools: `claim_next` (atomically take the next task — highest priority, then
@@ -87,9 +97,9 @@ Every mutation is a signed (Ed25519), content-addressed (BLAKE3) event in a
 Lamport-clock DAG; task state is derived from the log (see `PRD/PRD-v2.md`).
 
 ```sh
-rstask --db wa.sqlite sync export > a.bundle   # signed DAG (actors are events in it)
-rstask --db wb.sqlite sync import < a.bundle   # verify → merge → converge
-rstask sync status                             # heads, event count, pending
+rstasks --db wa.sqlite sync export > a.bundle   # signed DAG (actors are events in it)
+rstasks --db wb.sqlite sync import < a.bundle   # verify → merge → converge
+rstasks sync status                             # heads, event count, pending
 ```
 
 Concurrent claims resolve deterministically on every replica: first claim by
@@ -103,11 +113,11 @@ a received event may do is still decided by its signature and the merge rules.
 
 ```sh
 export RSTASK_P2P_TOKEN=…                    # shared secret; or p2p.token
-rstask p2p listen --bind 0.0.0.0:7701        # host A: prints {"spec": "ID@host:port", …}
-rstask p2p sync ID@a.example:7701            # host B: two-way sync, remembers the peer
-rstask p2p sync                              # every known peer
-rstask p2p peer add ID@HOST:PORT; rstask p2p peer list; rstask p2p status
-rstask p2p sync --every 30                   # keep syncing; or: p2p listen --sync-every 30
+rstasks p2p listen --bind 0.0.0.0:7701        # host A: prints {"spec": "ID@host:port", …}
+rstasks p2p sync ID@a.example:7701            # host B: two-way sync, remembers the peer
+rstasks p2p sync                              # every known peer
+rstasks p2p peer add ID@HOST:PORT; rstasks p2p peer list; rstasks p2p status
+rstasks p2p sync --every 30                   # keep syncing; or: p2p listen --sync-every 30
 ```
 
 `RSTASK_P2P_RELAY` / `p2p.relay`: `default` (n0's public relays and DNS, dial by
@@ -118,8 +128,8 @@ claim it took away from this replica (`lost_claims`).
 To add an actor on another machine without moving a secret key:
 
 ```sh
-rstask actor request bob --kind agent --role worker   # there: prints a request, keeps the key
-rstask actor admit '<request>'                        # here, as a human: signs bob's creation
+rstasks actor request bob --kind agent --role worker   # there: prints a request, keeps the key
+rstasks actor admit '<request>'                        # here, as a human: signs bob's creation
 ```
 
 After the next sync the new machine can act as `bob`.

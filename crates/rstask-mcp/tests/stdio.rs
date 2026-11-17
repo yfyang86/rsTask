@@ -1,11 +1,11 @@
-//! Sprint-05 UAT mirrors: drive the real `rstask-mcp` binary over stdio
+//! Sprint-05 UAT mirrors: drive the real `rstasks-mcp` binary over stdio
 //! (UAT U1, U3, U4). One server process per agent.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use rstask_core::{ActorKind, Store};
+use rstasks_core::{ActorKind, Store};
 use serde_json::{json, Value};
 
 struct Agent {
@@ -18,14 +18,14 @@ struct Agent {
 
 impl Agent {
     fn start(db: &Path, actor: &str) -> Agent {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rstask-mcp"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rstasks-mcp"))
             .arg("--db")
             .arg(db)
             .args(["--actor", actor])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .expect("spawn rstask-mcp");
+            .expect("spawn rstasks-mcp");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         let mut agent = Agent {
@@ -97,7 +97,7 @@ struct Workspace {
 }
 
 async fn workspace() -> Workspace {
-    let db = std::env::temp_dir().join(format!("rstask-mcp-{}.sqlite", std::process::id()));
+    let db = std::env::temp_dir().join(format!("rstasks-mcp-{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&db);
     let store = Store::open(&db).await.unwrap();
     let mut ids = Vec::new();
@@ -269,8 +269,9 @@ async fn agents_work_and_review_over_mcp() {
 
 #[test]
 fn unknown_actor_fails_before_serving() {
-    let db = std::env::temp_dir().join(format!("rstask-mcp-noactor-{}.sqlite", std::process::id()));
-    let out = Command::new(env!("CARGO_BIN_EXE_rstask-mcp"))
+    let db =
+        std::env::temp_dir().join(format!("rstasks-mcp-noactor-{}.sqlite", std::process::id()));
+    let out = Command::new(env!("CARGO_BIN_EXE_rstasks-mcp"))
         .arg("--db")
         .arg(&db)
         .args(["--actor", "nobody"])

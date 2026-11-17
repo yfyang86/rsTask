@@ -6,9 +6,11 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/yfyang86/rsTask"
 
 [workspace.dependencies]
-rstask-core = { path = "crates/rstask-core" }
+rstasks-core = { version = "0.1.0", path = "crates/rstask-core" }
 
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

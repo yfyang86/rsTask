@@ -1,4 +1,4 @@
-//! rstask-core — the single writer behind every RsTask interface.
+//! rstasks-core — the single writer behind every RsTasks interface.
 //!
 //! One core, one SQLite database. CLI/TUI/Web/MCP are thin shells over
 //! [`Store`]; no interface owns data.

@@ -1,4 +1,4 @@
-# RsTask configuration — layered: defaults → this file → env (RSTASK_*) → CLI flags.
+# RsTasks configuration — layered: defaults → this file → env (RSTASK_*) → CLI flags.
 
 [server]
 port = 7700

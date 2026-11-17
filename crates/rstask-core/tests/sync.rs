@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use rstask_core::sync::{decode_bundle, encode_bundle};
-use rstask_core::{ActorKind, Store, Submission, TaskStatus};
+use rstasks_core::sync::{decode_bundle, encode_bundle};
+use rstasks_core::{ActorKind, Store, Submission, TaskStatus};
 
 async fn store() -> Store {
     Store::open_in_memory().await.expect("open")
@@ -19,7 +19,7 @@ async fn exchange(a: &Store, b: &Store) {
 /// An actor provisioned on `a` (signed by its root) whose key is then
 /// carried to `b`'s key directory — how an actor comes to work on a second
 /// replica (PRD-v3 R1, R3).
-async fn provision(a: &Store, b: &Store, kind: ActorKind, name: &str) -> rstask_core::Actor {
+async fn provision(a: &Store, b: &Store, kind: ActorKind, name: &str) -> rstasks_core::Actor {
     let actor = a.create_actor(kind, name).await.unwrap();
     exchange(a, b).await;
     b.import_key(&actor.id, &a.export_key(&actor.id).unwrap())
@@ -435,7 +435,7 @@ async fn s06_links_and_roles_replicate() {
     let a = store().await;
     let alice = a.create_actor(ActorKind::Human, "alice").await.unwrap();
     let worker = a
-        .create_actor_with_roles(ActorKind::Agent, "worker", &[rstask_core::Role::Worker])
+        .create_actor_with_roles(ActorKind::Agent, "worker", &[rstasks_core::Role::Worker])
         .await
         .unwrap();
     let epic = a.create_task("epic", "", &alice.id).await.unwrap();
@@ -465,13 +465,13 @@ async fn s06_links_and_roles_replicate() {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, rstask_core::Error::Blocked { .. }),
+            matches!(err, rstasks_core::Error::Blocked { .. }),
             "got {err:?}"
         );
     }
     assert_eq!(
         b.get_actor(&worker.id).await.unwrap().roles.0,
-        vec![rstask_core::Role::Worker]
+        vec![rstasks_core::Role::Worker]
     );
 }
 

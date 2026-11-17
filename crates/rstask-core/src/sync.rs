@@ -45,7 +45,7 @@ pub struct LostClaim {
     pub reason: String,
 }
 
-/// Full-state sync unit: `rstask sync export|import` today, the payload of the
+/// Full-state sync unit: `rstasks sync export|import` today, the payload of the
 /// sprint-02 wire protocol tomorrow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncBundle {

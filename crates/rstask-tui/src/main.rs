@@ -1,4 +1,4 @@
-//! rstask-tui — minimal kanban board over the shared core.
+//! rstasks-tui — minimal kanban board over the shared core.
 //!
 //! Skeleton scope: four workflow columns (queue / work / review / done),
 //! refresh on `r`, quit on `q`. Tree/board/wip-limit views come later.
@@ -18,7 +18,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Terminal;
-use rstask_core::{Config, Store};
+use rstasks_core::{Config, Store};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

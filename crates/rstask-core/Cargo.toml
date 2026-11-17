@@ -1,9 +1,11 @@
 [package]
-name = "rstask-core"
-description = "RsTask core: models, SQLite storage, actor/claim/event semantics"
+name = "rstasks-core"
+description = "RsTasks core: models, SQLite storage, actor/claim/event semantics"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
+repository.workspace = true
 
 [dependencies]
 serde.workspace = true

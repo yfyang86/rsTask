@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use ed25519_dalek::SigningKey;
-use rstask_core::sync::{decode_bundle, encode_bundle};
-use rstask_core::{
+use rstasks_core::sync::{decode_bundle, encode_bundle};
+use rstasks_core::{
     Actor, ActorKind, Error, Merge, Role, Signable, Store, StoredEvent, Submission, SyncBundle,
     TaskStatus,
 };
@@ -101,7 +101,7 @@ async fn status(s: &Store, task: &str) -> TaskStatus {
 
 #[tokio::test]
 async fn secrets_live_in_the_key_directory_not_the_database() {
-    let dir = std::env::temp_dir().join(format!("rstask-keys-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("rstasks-keys-{}", uuid::Uuid::new_v4()));
     let db = dir.join("w.sqlite");
     let keys = dir.join("alice-keys");
     let s = Store::open_with_keys(&db, &keys).await.unwrap();
@@ -525,7 +525,7 @@ async fn a_protected_task_needs_a_human_approval() {
 
 #[tokio::test]
 async fn a_legacy_workspace_has_its_secrets_moved_out_and_scrubbed() {
-    let dir = std::env::temp_dir().join(format!("rstask-legacy-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("rstasks-legacy-{}", uuid::Uuid::new_v4()));
     let db = dir.join("w.sqlite");
     let s = Store::open(&db).await.unwrap();
     let alice = s.create_actor(ActorKind::Human, "alice").await.unwrap();

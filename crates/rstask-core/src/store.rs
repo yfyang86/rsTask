@@ -1393,7 +1393,7 @@ impl Store {
         Ok(rows.into_iter().map(|(id,)| to_id(&id)).collect())
     }
 
-    /// The signed DAG, for `rstask sync export`. Actors travel in it as
+    /// The signed DAG, for `rstasks sync export`. Actors travel in it as
     /// `actor.created` events.
     pub async fn export_bundle(&self) -> Result<SyncBundle> {
         let rows: Vec<EventRow> = sqlx::query_as(&format!(

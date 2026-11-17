@@ -1,16 +1,18 @@
 [package]
-name = "rstask-cli"
-description = "RsTask CLI — scriptable human operations"
+name = "rstasks"
+description = "RsTasks CLI — scriptable human operations"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
+repository.workspace = true
 
 [[bin]]
-name = "rstask"
+name = "rstasks"
 path = "src/main.rs"
 
 [dependencies]
-rstask-core = { workspace = true, features = ["net"] }
+rstasks-core = { workspace = true, features = ["net"] }
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true

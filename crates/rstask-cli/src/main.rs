@@ -1,15 +1,18 @@
-//! rstask — scriptable human operations over the shared RsTask core.
+//! rstasks — scriptable human operations over the shared RsTasks core.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use rstask_core::net::{load_or_create_node_key, NetConfig, Node, PeerSpec};
-use rstask_core::{ActorKind, Config, Event, Role, Store, Submission, Task, TaskStatus};
+use rstasks_core::net::{load_or_create_node_key, NetConfig, Node, PeerSpec};
+use rstasks_core::{ActorKind, Config, Event, Role, Store, Submission, Task, TaskStatus};
 
 #[derive(Parser)]
-#[command(name = "rstask", about = "Local-first, Markdown-native task workspace")]
+#[command(
+    name = "rstasks",
+    about = "Local-first, Markdown-native task workspace"
+)]
 struct Cli {
     /// Path to the SQLite database (CLI flag > RSTASK_STORAGE_DB_PATH > config).
     #[arg(long, global = true)]
@@ -443,13 +446,13 @@ async fn main() -> anyhow::Result<()> {
         Command::Sync { command } => match command {
             SyncCommand::Export => {
                 let bundle = store.export_bundle().await?;
-                let bytes = rstask_core::sync::encode_bundle(&bundle);
+                let bytes = rstasks_core::sync::encode_bundle(&bundle);
                 std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
             }
             SyncCommand::Import => {
                 let mut buf = Vec::new();
                 std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)?;
-                let bundle = rstask_core::sync::decode_bundle(&buf)?;
+                let bundle = rstasks_core::sync::decode_bundle(&buf)?;
                 let merge = store.receive_bundle(&bundle).await?;
                 println!("{}", serde_json::to_string_pretty(&merge)?);
             }
@@ -496,7 +499,7 @@ async fn main() -> anyhow::Result<()> {
                 let peer: Option<PeerSpec> = peer.map(|spec| spec.parse()).transpose()?;
                 anyhow::ensure!(
                     peer.is_some() || !store.list_peers().await?.is_empty(),
-                    "no peers: `rstask p2p peer add ID@HOST:PORT`"
+                    "no peers: `rstasks p2p peer add ID@HOST:PORT`"
                 );
                 let node = start_node(&cfg.p2p, &node_key, store.clone(), None).await?;
                 let failed = match every {
@@ -627,7 +630,7 @@ async fn stop_signal() -> anyhow::Result<()> {
 
 /// Bring up this replica's network node.
 async fn start_node(
-    p2p: &rstask_core::config::P2pConfig,
+    p2p: &rstasks_core::config::P2pConfig,
     node_key: &Path,
     store: Arc<Store>,
     bind: Option<std::net::SocketAddr>,

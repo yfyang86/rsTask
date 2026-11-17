@@ -5,8 +5,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rstask_core::net::{NetConfig, Node, PeerSpec, RelayChoice};
-use rstask_core::{ActorKind, Error, Store, Submission, TaskStatus};
+use rstasks_core::net::{NetConfig, Node, PeerSpec, RelayChoice};
+use rstasks_core::{ActorKind, Error, Store, Submission, TaskStatus};
 
 struct Replica {
     store: Arc<Store>,
