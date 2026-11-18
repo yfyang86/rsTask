@@ -537,14 +537,21 @@ async fn a_legacy_workspace_has_its_secrets_moved_out_and_scrubbed() {
         .execute(s.pool())
         .await
         .unwrap();
-    s.pool().close().await;
-    drop(s);
-    std::fs::remove_dir_all(dir.join("keys")).unwrap();
     let holds_secret = |file: &str| {
         let bytes = std::fs::read(dir.join(file)).unwrap_or_default();
         bytes.windows(32).any(|w| w == secret)
     };
-    assert!(holds_secret("w.sqlite") || holds_secret("w.sqlite-wal"));
+    // Flush the write-ahead log into the database file while the pool is
+    // still open, and check there: what the files hold right after a pool
+    // closes depends on when its connections finish closing.
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(s.pool())
+        .await
+        .unwrap();
+    assert!(holds_secret("w.sqlite"), "the legacy layout is in place");
+    s.pool().close().await;
+    drop(s);
+    std::fs::remove_dir_all(dir.join("keys")).unwrap();
 
     let s = Store::open(&db).await.unwrap();
     assert_eq!(
