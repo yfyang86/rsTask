@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Pinned so a new compiler's lints cannot turn an unrelated PR red.
       - uses: dtolnay/rust-toolchain@1.97.0
         with:

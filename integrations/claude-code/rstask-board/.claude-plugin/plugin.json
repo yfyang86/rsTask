@@ -3,5 +3,5 @@
   "version": "0.1.1",
   "description": "Sidebar pane with the rstasks kanban board of the session folder (work / review / queue / done), refreshed every 15s",
   "types": "./types/index.d.ts",
-  "license": "Apache-2.0"
+  "license": "MIT"
 }
