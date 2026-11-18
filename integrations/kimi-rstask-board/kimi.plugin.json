@@ -2,7 +2,7 @@
   "name": "rstask-board",
   "version": "0.1.1",
   "description": "Read-only RsTasks kanban board for the current workspace, provided through MCP and a slash command",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "commands": "./commands/",
   "skills": "./skills/",
   "sessionStart": {
