@@ -41,6 +41,9 @@ use crate::sync::{differing_buckets, Bucket, Merge};
 
 pub const ALPN: &[u8] = b"rstask/1";
 const MAX_FRAME: usize = 16 << 20;
+/// Handshake frames are tiny; a peer that has not proved it holds the token
+/// cannot make us allocate more than this.
+const MAX_HANDSHAKE_FRAME: usize = 256;
 /// Events per `GetEvents` / `Push` frame.
 const EVENT_BATCH: usize = 48;
 const MAX_IDS: usize = 400_000;
@@ -202,6 +205,10 @@ async fn write_msg(w: &mut (impl AsyncWrite + Unpin), m: &Msg) -> Result<()> {
 }
 
 async fn read_msg(r: &mut (impl AsyncRead + Unpin)) -> Result<Msg> {
+    read_frame(r, MAX_FRAME).await
+}
+
+async fn read_frame(r: &mut (impl AsyncRead + Unpin), max: usize) -> Result<Msg> {
     async fn fill(r: &mut (impl AsyncRead + Unpin), buf: &mut [u8]) -> Result<()> {
         tokio::time::timeout(IO_TIMEOUT, r.read_exact(buf))
             .await
@@ -212,7 +219,7 @@ async fn read_msg(r: &mut (impl AsyncRead + Unpin)) -> Result<Msg> {
     let mut len = [0u8; 4];
     fill(r, &mut len).await?;
     let len = u32::from_be_bytes(len) as usize;
-    if len > MAX_FRAME {
+    if len > max {
         return Err(Error::Net("frame too large".into()));
     }
     let mut buf = vec![0u8; len];
@@ -516,7 +523,7 @@ async fn serve(h: &Handler, conn: &Connection) -> Result<()> {
         .accept_bi()
         .await
         .map_err(net("cannot accept stream"))?;
-    let Msg::Hello { nonce: nonce_c } = read_msg(&mut recv).await? else {
+    let Msg::Hello { nonce: nonce_c } = read_frame(&mut recv, MAX_HANDSHAKE_FRAME).await? else {
         return Err(Error::Net("expected Hello".into()));
     };
     let nonce_s: [u8; 32] = rand::random();
@@ -527,7 +534,7 @@ async fn serve(h: &Handler, conn: &Connection) -> Result<()> {
     };
     write_msg(&mut send, &ack).await?;
     // A dialer holding another token stops here: it rejects our MAC and hangs up.
-    let Msg::Auth { mac } = read_msg(&mut recv).await? else {
+    let Msg::Auth { mac } = read_frame(&mut recv, MAX_HANDSHAKE_FRAME).await? else {
         return Err(Error::Net("expected Auth".into()));
     };
     let expected = handshake_mac(&h.key, b"client", &remote, &h.me, &nonce_c, &nonce_s);

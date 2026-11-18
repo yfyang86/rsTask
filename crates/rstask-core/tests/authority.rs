@@ -641,3 +641,26 @@ async fn a_request_must_be_intact_and_cannot_found_a_workspace() {
     let err = a.admit_actor(&request, None).await.unwrap_err();
     assert!(matches!(err, Error::InvalidRequest(_)), "got {err:?}");
 }
+
+// ---- Review fixes after the 0.1.0 release ----
+
+#[tokio::test]
+async fn a_second_task_created_cannot_rewrite_a_held_task() {
+    let w = world().await;
+    w.s.claim_task(&w.task, &w.bot, TTL).await.unwrap();
+    // rival is a planner but not the holder: `task.updated` is ineffective
+    // for it, so it must not get the same edit through a re-sent creation.
+    let m = forge(
+        &w.s,
+        &w.rival,
+        &w.task,
+        "task.created",
+        json!({ "title": "hijacked", "body_md": "rewritten" }),
+        0,
+    )
+    .await;
+    assert_eq!(m.rejected, 0, "{m:?}");
+    let _ = forge(&w.s, &w.bot, &w.task, "task.renewed", json!({}), 0).await; // any refold
+    let task = w.s.get_task(&w.task).await.unwrap();
+    assert_eq!((task.title.as_str(), task.body_md.as_str()), ("t", ""));
+}

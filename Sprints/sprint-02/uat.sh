@@ -3,8 +3,8 @@
 # Loopback only, relay disabled: no third-party service is contacted.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/../.." && pwd)
-cargo build -q -p rstask-cli --manifest-path "$ROOT/Cargo.toml"
-BIN=$ROOT/target/debug/rstask; W=$(mktemp -d); EV=$HERE/uat-evidence
+cargo build -q -p rstasks --manifest-path "$ROOT/Cargo.toml" || exit 1
+BIN=$ROOT/target/debug/rstasks; W=$(mktemp -d); EV=$HERE/uat-evidence
 export RUST_BACKTRACE=0 RSTASK_P2P_RELAY=disabled
 a() { RSTASK_P2P_TOKEN=workspace-token "$BIN" --db "$W/a/w.sqlite" "$@"; }
 b() { RSTASK_P2P_TOKEN=workspace-token "$BIN" --db "$W/b/w.sqlite" "$@"; }

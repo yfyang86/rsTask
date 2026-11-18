@@ -2284,7 +2284,9 @@ async fn refold_task_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, task_id: &
         let planner = who.is_some_and(|(_, roles)| roles.0.contains(&Role::Planner));
         f.expire(at);
         match kind.as_str() {
-            "task.created" => {
+            // Only the creation: a later `task.created` for the same id must
+            // not be a way around the edit rule below.
+            "task.created" if title.is_none() => {
                 title = p["title"].as_str().map(str::to_string);
                 body_md = p["body_md"].as_str().map(str::to_string);
                 content_at = content_at.max(Some(at));

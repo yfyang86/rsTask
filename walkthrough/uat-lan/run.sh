@@ -13,7 +13,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 REPO=$(cd ../.. && pwd)
-BIN=$REPO/target/debug/rstask
+BIN=$REPO/target/debug/rstasks
 EV=$PWD/evidence
 WS=/tmp/rstask-uat-lan
 PORT=${PORT:-7701}
@@ -30,8 +30,8 @@ a() { "$BIN" --db "$WS/a/a.sqlite" "$@"; }
 b() { "$BIN" --db "$WS/b/b.sqlite" "$@"; }
 
 build() {
-    [ -x "$BIN" ] || cargo build -q -p rstask-cli --manifest-path "$REPO/Cargo.toml" || {
-        echo "build failed: cargo build -p rstask-cli" >&2; exit 1; }
+    [ -x "$BIN" ] || cargo build -q -p rstasks --manifest-path "$REPO/Cargo.toml" || {
+        echo "build failed: cargo build -p rstasks" >&2; exit 1; }
 }
 
 # start a's listener, wait for its {"spec": ...} line, set NODE_A.

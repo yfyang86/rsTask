@@ -2,8 +2,8 @@
 # Sprint 03 UAT — regenerates uat-evidence/. Run from anywhere: ./uat.sh
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/../.." && pwd)
-cargo build -q -p rstask-cli --manifest-path "$ROOT/Cargo.toml"
-BIN=$ROOT/target/debug/rstask; W=$(mktemp -d); EV=$HERE/uat-evidence
+cargo build -q -p rstasks --manifest-path "$ROOT/Cargo.toml" || exit 1
+BIN=$ROOT/target/debug/rstasks; W=$(mktemp -d); EV=$HERE/uat-evidence
 export RUST_BACKTRACE=0
 a() { "$BIN" --db "$W/a.sqlite" "$@"; }
 b() { "$BIN" --db "$W/b.sqlite" "$@"; }

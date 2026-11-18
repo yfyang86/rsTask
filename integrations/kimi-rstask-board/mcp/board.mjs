@@ -5,13 +5,22 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export const BOARD_QUERY = `SELECT substr(t.id,1,8) AS id, t.status, t.title, t.updated_at AS updated,
+// The database is read as it is on disk, without rstasks' own sweep: a task
+// still marked `work` whose claim has lapsed is back in the queue as far as
+// rstasks is concerned, and unfinished subtasks block a task like dependencies do.
+export const BOARD_QUERY = `SELECT substr(t.id,1,8) AS id,
+ CASE WHEN t.status = 'work' AND NOT EXISTS (SELECT 1 FROM claims c
+   WHERE c.task_id = t.id AND c.released_at IS NULL
+     AND c.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  THEN 'queue' ELSE t.status END AS status,
+ t.title, t.updated_at AS updated,
  (SELECT a.name FROM claims c JOIN actors a ON a.id = c.actor_id
    WHERE c.task_id = t.id AND c.released_at IS NULL
      AND c.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')
    ORDER BY c.claimed_at DESC LIMIT 1) AS holder,
  (SELECT count(*) FROM task_deps d JOIN tasks b ON b.id = d.blocked_by
-   WHERE d.task_id = t.id AND b.status != 'done') AS blockers
+   WHERE d.task_id = t.id AND b.status != 'done')
+ + (SELECT count(*) FROM tasks s WHERE s.parent_id = t.id AND s.status != 'done') AS blockers
 FROM tasks t ORDER BY t.updated_at DESC`;
 
 const ORDER = ["work", "review", "queue", "done"];
